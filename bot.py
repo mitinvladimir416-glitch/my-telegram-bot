@@ -147,6 +147,8 @@ async def cmd_help(message: Message):
         "Что я умею:\n"
         "— Просто пиши мне вопросы, и я отвечу с помощью нейросети\n"
         "— /reset — очистить историю нашего диалога\n"
+        "— /translate <текст> — перевести текст (авто: RU→EN, другое→RU)\n"
+        "— /translate <код языка> <текст> — перевод на конкретный язык, например /translate es Привет\n"
         "— /help — показать это сообщение"
     )
 
@@ -173,6 +175,72 @@ async def get_ai_reply(user_id: int, user_text: str) -> str:
     history.append({"role": "assistant", "content": reply})
     save_histories()
     return reply
+
+
+async def translate_text(text: str, target_lang: str | None = None) -> str:
+    """Переводит текст через нейросеть. Если target_lang не задан — авто: RU->EN, иначе->RU."""
+    if target_lang:
+        instruction = (
+            f"Переведи следующий текст на язык с кодом '{target_lang}'. "
+            "Ответь ТОЛЬКО переводом, без пояснений, кавычек и комментариев."
+        )
+    else:
+        instruction = (
+            "Определи язык текста. Если текст на русском — переведи на английский. "
+            "Если текст на любом другом языке — переведи на русский. "
+            "Сохрани тон и смысл максимально точно. "
+            "Ответь ТОЛЬКО переводом, без пояснений, кавычек, комментариев и указания языка."
+        )
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": instruction},
+                {"role": "user", "content": text},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        return clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при переводе")
+        return describe_groq_error(e)
+
+
+@dp.message(F.text.startswith("/translate"))
+async def cmd_translate(message: Message):
+    if is_rate_limited(message.from_user.id):
+        await message.answer(
+            f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
+            f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+        )
+        return
+
+    # Убираем саму команду "/translate" из текста
+    remainder = message.text[len("/translate"):].strip()
+
+    if not remainder:
+        await message.answer(
+            "Использование:\n"
+            "/translate <текст> — авто-перевод (RU→EN, другое→RU)\n"
+            "/translate <код языка> <текст> — перевод на конкретный язык\n\n"
+            "Например: /translate en Привет, как дела?"
+        )
+        return
+
+    # Проверяем, не начинается ли текст с короткого кода языка (2-3 буквы + пробел)
+    parts = remainder.split(maxsplit=1)
+    target_lang = None
+    text_to_translate = remainder
+
+    if len(parts) == 2 and re.fullmatch(r"[a-zA-Z]{2,3}", parts[0]):
+        target_lang = parts[0].lower()
+        text_to_translate = parts[1]
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    translation = await translate_text(text_to_translate, target_lang)
+    await message.answer(f"🌐 {translation}")
 
 
 @dp.message(F.text)
