@@ -61,8 +61,7 @@ WELCOME_TEXT = (
     "🎤 Скидывать войсы — слушаю внимательно\n"
     "📸 Кидать фотки — разберу, что на них\n\n"
     "Погнали, я на связи 24/7 🔥\n"
-    "/help — если заблудился\n"
-    "/menu — открыть меню с кнопками"
+    "Выбирай режим прямо в меню ниже 👇"
 )
 
 
@@ -167,6 +166,10 @@ def describe_groq_error(e: Exception) -> str:
 
 # ==================== МЕНЮ С КНОПКАМИ ====================
 
+# Храним, у кого сейчас включён режим перевода в чате (и на какой язык)
+user_translate_mode: dict[int, dict] = {}
+
+
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -189,25 +192,51 @@ MENU_CHAT_TEXT = (
     "Просто пиши мне сообщения текстом, голосом или фото — я отвечу с помощью нейросети.\n"
     "Всё уже работает, ничего дополнительно нажимать не нужно 🙂"
 )
-MENU_TRANSLATE_TEXT = (
-    "🌐 <b>Переводчик</b>\n\n"
-    "Используй команду:\n"
-    "<code>/translate текст</code> — авто-перевод (RU→EN, другое→RU)\n"
-    "<code>/translate en текст</code> — перевод на конкретный язык\n\n"
-    "Например: <code>/translate en Привет, как дела?</code>"
-)
 MENU_HELP_TEXT = (
     "ℹ️ <b>Помощь</b>\n\n"
     "— Просто пиши мне вопросы, и я отвечу с помощью нейросети\n"
     "— /reset — очистить историю нашего диалога\n"
-    "— /translate — перевод текста\n"
+    "— /translate — перевод текста командой\n"
     "— /menu — открыть это меню\n"
     "— /help — показать список команд"
 )
 
+# Языки с быстрым доступом из меню переводчика
+QUICK_LANGUAGES = {
+    "en": "английский",
+    "fr": "французский",
+    "de": "немецкий",
+}
+
+TRANSLATE_SUBMENU_TEXT = "🌐 <b>Переводчик</b>\n\nВыбери язык — и просто присылай текст, буду переводить:"
+
+
+def translate_submenu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="🇬🇧 Английский", callback_data="tr_lang_en"),
+                InlineKeyboardButton(text="🇫🇷 Французский", callback_data="tr_lang_fr"),
+            ],
+            [
+                InlineKeyboardButton(text="🇩🇪 Немецкий", callback_data="tr_lang_de"),
+                InlineKeyboardButton(text="🔍 Определить язык", callback_data="tr_lang_auto"),
+            ],
+            [InlineKeyboardButton(text="⌨️ Указать язык", callback_data="tr_lang_custom")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+def translate_active_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ Сменить язык / Выйти", callback_data="menu_translate")]]
+    )
+
 
 @dp.message(F.text == "/menu")
 async def cmd_menu(message: Message):
+    user_translate_mode.pop(message.from_user.id, None)
     await message.answer(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
@@ -219,7 +248,48 @@ async def callback_menu_chat(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_translate")
 async def callback_menu_translate(callback: CallbackQuery):
-    await callback.message.edit_text(MENU_TRANSLATE_TEXT, reply_markup=back_keyboard(), parse_mode="HTML")
+    # Выходим из режима перевода при повторном открытии подменю (например, чтобы сменить язык)
+    user_translate_mode.pop(callback.from_user.id, None)
+    await callback.message.edit_text(
+        TRANSLATE_SUBMENU_TEXT, reply_markup=translate_submenu_keyboard(), parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.in_(["tr_lang_en", "tr_lang_fr", "tr_lang_de"]))
+async def callback_translate_quick_lang(callback: CallbackQuery):
+    lang_code = callback.data.split("_")[-1]
+    lang_name = QUICK_LANGUAGES[lang_code]
+    user_translate_mode[callback.from_user.id] = {"target_lang": lang_code}
+    await callback.message.edit_text(
+        f"✅ Режим перевода на <b>{lang_name}</b> включён.\n\nПросто присылай текст — переведу.",
+        reply_markup=translate_active_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "tr_lang_auto")
+async def callback_translate_auto(callback: CallbackQuery):
+    user_translate_mode[callback.from_user.id] = {"target_lang": None}
+    await callback.message.edit_text(
+        "✅ Режим <b>автоопределения</b> включён (RU→EN, другой язык→RU).\n\n"
+        "Просто присылай текст — переведу.",
+        reply_markup=translate_active_keyboard(),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "tr_lang_custom")
+async def callback_translate_custom(callback: CallbackQuery):
+    user_translate_mode[callback.from_user.id] = {"awaiting_custom_lang": True}
+    await callback.message.edit_text(
+        "⌨️ Напиши, на какой язык переводить.\n"
+        "Можно и код (es, ja, pt), и название (испанский, japanese).",
+        reply_markup=translate_active_keyboard(),
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 
@@ -231,6 +301,7 @@ async def callback_menu_help(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_back")
 async def callback_menu_back(callback: CallbackQuery):
+    user_translate_mode.pop(callback.from_user.id, None)
     await callback.message.edit_text(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
     await callback.answer()
 
@@ -241,14 +312,17 @@ async def callback_menu_back(callback: CallbackQuery):
 async def cmd_start(message: Message):
     register_user(message.from_user.id)
     user_histories[message.from_user.id] = []
+    user_translate_mode.pop(message.from_user.id, None)
 
     if os.path.exists(WELCOME_IMAGE):
         photo = FSInputFile(WELCOME_IMAGE)
-        await message.answer_photo(photo, caption=WELCOME_TEXT, parse_mode="HTML")
+        await message.answer_photo(
+            photo, caption=WELCOME_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML"
+        )
     else:
         # Если картинка не найдена — просто отправляем текст, чтобы бот не падал
         logging.warning(f"Файл {WELCOME_IMAGE} не найден, отправляю только текст")
-        await message.answer(WELCOME_TEXT, parse_mode="HTML")
+        await message.answer(WELCOME_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
 @dp.message(F.text == "/reset")
@@ -423,8 +497,35 @@ async def cmd_broadcast_text(message: Message):
 @dp.message(F.text)
 async def handle_message(message: Message):
     register_user(message.from_user.id)
+    user_id = message.from_user.id
 
-    if is_rate_limited(message.from_user.id):
+    # Если у пользователя включён режим перевода — обрабатываем текст иначе
+    mode = user_translate_mode.get(user_id)
+    if mode is not None:
+        if is_rate_limited(user_id):
+            await message.answer(
+                f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
+                f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+            )
+            return
+
+        # Пользователь вводит название/код языка после нажатия "Указать язык"
+        if mode.get("awaiting_custom_lang"):
+            custom_lang = message.text.strip()
+            user_translate_mode[user_id] = {"target_lang": custom_lang}
+            await message.answer(
+                f"✅ Режим перевода на «{custom_lang}» включён.\n\nПросто присылай текст — переведу.",
+                reply_markup=translate_active_keyboard(),
+            )
+            return
+
+        # Обычный текст в активном режиме перевода — переводим и остаёмся в режиме
+        await bot.send_chat_action(message.chat.id, "typing")
+        translation = await translate_text(message.text, mode.get("target_lang"))
+        await message.answer(f"🌐 {translation}", reply_markup=translate_active_keyboard())
+        return
+
+    if is_rate_limited(user_id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
             f"запросов в {RATE_LIMIT_WINDOW} секунд)."
@@ -432,7 +533,7 @@ async def handle_message(message: Message):
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
-    reply = await get_ai_reply(message.from_user.id, message.text)
+    reply = await get_ai_reply(user_id, message.text)
     await message.answer(reply)
 
 
