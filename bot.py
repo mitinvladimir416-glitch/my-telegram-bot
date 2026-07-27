@@ -6,6 +6,8 @@ import os
 import re
 import tempfile
 import time
+import uuid
+import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -24,6 +26,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")  # твой Telegram ID — только ты сможешь делать рассылку
+GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY")  # Authorization key из Sber Studio
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError(
@@ -49,6 +52,26 @@ dp = Dispatcher()
 # max_retries=0 — чтобы при лимите Groq бот сразу отвечал понятным сообщением,
 # а не "молчал" по 20-30 секунд, пока SDK сам пытается повторить запрос
 groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
+
+
+async def _typing_loop(chat_id: int):
+    """Периодически шлёт 'печатает...', пока идёт долгий запрос к нейросети —
+    иначе Telegram гасит индикатор через ~5 секунд."""
+    try:
+        while True:
+            await bot.send_chat_action(chat_id, "typing")
+            await asyncio.sleep(4)
+    except asyncio.CancelledError:
+        pass
+
+
+async def with_typing(chat_id: int, coro):
+    """Оборачивает долгий вызов нейросети, поддерживая индикатор 'печатает...' всё время."""
+    typing_task = asyncio.create_task(_typing_loop(chat_id))
+    try:
+        return await coro
+    finally:
+        typing_task.cancel()
 
 SYSTEM_PROMPT = "Ты дружелюбный ассистент, отвечай кратко и по делу на русском языке."
 
@@ -167,6 +190,85 @@ def describe_groq_error(e: Exception) -> str:
     return "Произошла непредвиденная ошибка. Попробуй ещё раз."
 
 
+# ==================== GIGACHAT (только для раздела "Промпты") ====================
+
+GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
+GIGACHAT_CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
+
+_gigachat_token = {"value": None, "expires_at": 0}
+
+
+def get_gigachat_token() -> str:
+    """Получает (и кэширует на ~28 минут) токен доступа GigaChat."""
+    if _gigachat_token["value"] and time.time() < _gigachat_token["expires_at"]:
+        return _gigachat_token["value"]
+
+    response = requests.post(
+        GIGACHAT_OAUTH_URL,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+            "RqUID": str(uuid.uuid4()),
+            "Authorization": f"Basic {GIGACHAT_AUTH_KEY}",
+        },
+        data={"scope": "GIGACHAT_API_PERS"},
+        verify=False,  # у GigaChat используется российский корневой сертификат
+        timeout=15,
+    )
+    response.raise_for_status()
+    data = response.json()
+    _gigachat_token["value"] = data["access_token"]
+    # Токен живёт 30 минут, обновляем чуть раньше на всякий случай
+    _gigachat_token["expires_at"] = time.time() + 28 * 60
+    return _gigachat_token["value"]
+
+
+def gigachat_chat_completion(messages: list) -> str:
+    """Отправляет сообщения в GigaChat и возвращает текст ответа (синхронная функция)."""
+    token = get_gigachat_token()
+    response = requests.post(
+        GIGACHAT_CHAT_URL,
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        json={"model": "GigaChat", "messages": messages, "temperature": 0.7},
+        verify=False,
+        timeout=60,
+    )
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"]
+
+
+async def call_prompt_model(model_choice: str, messages: list) -> str:
+    """Единая точка вызова нейросети для раздела 'Промпты' — Groq или GigaChat."""
+    if model_choice == "gigachat":
+        if not GIGACHAT_AUTH_KEY:
+            return "GigaChat пока не настроен (нет ключа). Переключись на обычную модель в меню."
+        try:
+            # requests — синхронная библиотека, выполняем в отдельном потоке, чтобы не блокировать бота
+            reply = await asyncio.to_thread(gigachat_chat_completion, messages)
+            return clean_reply(reply)
+        except Exception as e:
+            logging.exception("Ошибка при обращении к GigaChat")
+            return "Не удалось получить ответ от GigaChat. Попробуй ещё раз или переключись на другую модель."
+
+    # По умолчанию — Groq
+    try:
+        response = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1500,
+        )
+        return clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при обращении к Groq API")
+        return describe_groq_error(e)
+
+
 # ==================== МЕНЮ С КНОПКАМИ ====================
 
 # Храним, у кого сейчас включён режим перевода в чате (и на какой язык)
@@ -175,6 +277,7 @@ user_translate_mode: dict[int, dict] = {}
 # Храним, у кого сейчас включён режим составления промптов (и историю диалога по теме)
 user_prompt_mode: dict[int, str] = {}  # user_id -> "suno" / "image" / "video"
 user_prompt_histories: dict[int, list] = {}
+user_prompt_model: dict[int, str] = {}  # user_id -> "groq" / "gigachat", по умолчанию groq
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -238,7 +341,10 @@ def translate_submenu_keyboard() -> InlineKeyboardMarkup:
 
 def translate_active_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="◀️ Сменить язык / Выйти", callback_data="menu_translate")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Сменить язык", callback_data="menu_translate")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
     )
 
 
@@ -316,19 +422,32 @@ PROMPT_CONFIG = {
 }
 
 
-def prompts_submenu_keyboard() -> InlineKeyboardMarkup:
+def prompts_submenu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    current_model = user_prompt_model.get(user_id, "groq")
+    groq_label = "✅ Groq (быстрый)" if current_model == "groq" else "⚪ Groq (быстрый)"
+    giga_label = "✅ GigaChat (RU)" if current_model == "gigachat" else "⚪ GigaChat (RU)"
+
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=cfg["label"], callback_data=f"prompt_{key}")]
             for key, cfg in PROMPT_CONFIG.items()
         ]
-        + [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]]
+        + [
+            [
+                InlineKeyboardButton(text=groq_label, callback_data="prompt_model_groq"),
+                InlineKeyboardButton(text=giga_label, callback_data="prompt_model_gigachat"),
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
     )
 
 
 def prompt_active_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="◀️ Сменить тему / Выйти", callback_data="menu_prompts")]]
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Сменить тему", callback_data="menu_prompts")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
     )
 
 
@@ -383,7 +502,7 @@ async def get_image_prompt_from_photo(user_id: int, image_base64: str, desired_c
     return reply
 
 
-
+async def get_prompt_reply(user_id: int, prompt_type: str, user_text: str) -> str:
     """Ведёт диалог по составлению промпта в выбранной теме (suno/image/video)."""
     config = PROMPT_CONFIG[prompt_type]
     history = user_prompt_histories.setdefault(user_id, [])
@@ -391,17 +510,8 @@ async def get_image_prompt_from_photo(user_id: int, image_base64: str, desired_c
     trimmed_history = history[-20:]
     messages = [{"role": "system", "content": config["system_prompt"]}] + trimmed_history
 
-    try:
-        response = groq_client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1500,
-        )
-        reply = clean_reply(response.choices[0].message.content)
-    except Exception as e:
-        logging.exception("Ошибка при составлении промпта")
-        reply = describe_groq_error(e)
+    model_choice = user_prompt_model.get(user_id, "groq")
+    reply = await call_prompt_model(model_choice, messages)
 
     history.append({"role": "assistant", "content": reply})
     return reply
@@ -490,7 +600,19 @@ async def callback_menu_help(callback: CallbackQuery):
 @dp.callback_query(F.data == "menu_prompts")
 async def callback_menu_prompts(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
-    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard())
+    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard(callback.from_user.id))
+
+
+@dp.callback_query(F.data.in_(["prompt_model_groq", "prompt_model_gigachat"]))
+async def callback_prompt_select_model(callback: CallbackQuery):
+    chosen = "gigachat" if callback.data == "prompt_model_gigachat" else "groq"
+
+    if chosen == "gigachat" and not GIGACHAT_AUTH_KEY:
+        await callback.answer("GigaChat пока не подключен — не задан ключ.", show_alert=True)
+        return
+
+    user_prompt_model[callback.from_user.id] = chosen
+    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard(callback.from_user.id))
 
 
 @dp.callback_query(F.data.in_([f"prompt_{k}" for k in PROMPT_CONFIG.keys()]))
@@ -630,7 +752,7 @@ async def cmd_translate(message: Message):
         text_to_translate = parts[1]
 
     await bot.send_chat_action(message.chat.id, "typing")
-    translation = await translate_text(text_to_translate, target_lang)
+    translation = await with_typing(message.chat.id, translate_text(text_to_translate, target_lang))
     await message.answer(f"🌐 {translation}")
 
 
@@ -725,8 +847,7 @@ async def handle_message(message: Message):
             return
 
         # Обычный текст в активном режиме перевода — переводим и остаёмся в режиме
-        await bot.send_chat_action(message.chat.id, "typing")
-        translation = await translate_text(message.text, mode.get("target_lang"))
+        translation = await with_typing(message.chat.id, translate_text(message.text, mode.get("target_lang")))
         await message.answer(f"🌐 {translation}", reply_markup=translate_active_keyboard())
         return
 
@@ -740,8 +861,7 @@ async def handle_message(message: Message):
             )
             return
 
-        await bot.send_chat_action(message.chat.id, "typing")
-        reply = await get_prompt_reply(user_id, prompt_type, message.text)
+        reply = await with_typing(message.chat.id, get_prompt_reply(user_id, prompt_type, message.text))
         await message.answer(reply, reply_markup=prompt_active_keyboard())
         return
 
@@ -837,7 +957,10 @@ async def handle_photo(message: Message):
             )
             return
 
-        reply = await get_image_prompt_from_photo(message.from_user.id, image_base64, message.caption)
+        reply = await with_typing(
+            message.chat.id,
+            get_image_prompt_from_photo(message.from_user.id, image_base64, message.caption),
+        )
         await message.answer(reply, reply_markup=prompt_active_keyboard())
         return
 
