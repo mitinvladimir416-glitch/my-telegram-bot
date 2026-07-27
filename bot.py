@@ -7,7 +7,7 @@ import re
 import tempfile
 import time
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
+from aiogram.types import Message, FSInputFile
 from aiogram.filters import CommandStart
 from groq import Groq, APIConnectionError, APIStatusError, RateLimitError
 from dotenv import load_dotenv
@@ -41,6 +41,18 @@ dp = Dispatcher()
 groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
 
 SYSTEM_PROMPT = "Ты дружелюбный ассистент, отвечай кратко и по делу на русском языке."
+
+WELCOME_IMAGE = "welcome.jpg"
+WELCOME_TEXT = (
+    "🤖 <b>ЙО! ДОБРО ПОЖАЛОВАТЬ В МИР БОТЯРЫ!</b>\n\n"
+    "Ты нажал /start — а значит, обратной дороги нет 😈\n\n"
+    "Тут можно:\n"
+    "💬 Просто общаться — отвечу на любой вопрос\n"
+    "🎤 Скидывать войсы — слушаю внимательно\n"
+    "📸 Кидать фотки — разберу, что на них\n\n"
+    "Погнали, я на связи 24/7 🔥\n"
+    "/help — если заблудился"
+)
 
 
 def load_histories() -> dict:
@@ -112,10 +124,14 @@ def describe_groq_error(e: Exception) -> str:
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_histories[message.from_user.id] = []
-    await message.answer(
-        "Привет! Я бот с ИИ на борту. Просто напиши сообщение — и я отвечу.\n"
-        "Команда /reset — очистить историю диалога."
-    )
+
+    if os.path.exists(WELCOME_IMAGE):
+        photo = FSInputFile(WELCOME_IMAGE)
+        await message.answer_photo(photo, caption=WELCOME_TEXT, parse_mode="HTML")
+    else:
+        # Если картинка не найдена — просто отправляем текст, чтобы бот не падал
+        logging.warning(f"Файл {WELCOME_IMAGE} не найден, отправляю только текст")
+        await message.answer(WELCOME_TEXT, parse_mode="HTML")
 
 
 @dp.message(F.text == "/reset")
