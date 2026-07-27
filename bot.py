@@ -119,6 +119,13 @@ def register_user(user_id: int):
 user_histories = load_histories()
 registered_users = load_users()
 
+# Подтягиваем в список рассылки всех, кто уже есть в истории переписки
+# (важно после обновления бота, когда users.json ещё не существовал)
+_users_before = len(registered_users)
+registered_users |= set(user_histories.keys())
+if len(registered_users) != _users_before:
+    save_users()
+
 
 def clean_reply(text: str) -> str:
     """Убирает следы внутренних рассуждений модели, если они просочились в ответ."""
