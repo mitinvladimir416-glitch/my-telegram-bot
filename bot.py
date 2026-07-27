@@ -278,6 +278,7 @@ user_translate_mode: dict[int, dict] = {}
 user_prompt_mode: dict[int, str] = {}  # user_id -> "suno" / "image" / "video"
 user_prompt_histories: dict[int, list] = {}
 user_prompt_model: dict[int, str] = {}  # user_id -> "groq" / "gigachat", по умолчанию groq
+user_prompt_target: dict[int, str] = {}  # user_id -> выбранная версия/нейросеть (текст для показа)
 
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
@@ -355,18 +356,22 @@ PROMPTS_SUBMENU_TEXT = "🎨 <b>Помощник по промптам</b>\n\nВ
 PROMPT_CONFIG = {
     "suno": {
         "label": "🎵 Suno (музыка)",
-        "intro": (
-            "🎵 <b>Промпт для Suno</b>\n\n"
-            "Для начала: под какую версию Suno делаем промпт (4, 4.5, 5, 5.5 и т.д.)?\n"
-            "И расскажи идею трека — жанр, настроение, тематику, есть ли вокал."
+        "target_question": "🎵 <b>Suno</b>\n\nКакая версия?",
+        "targets": [
+            ("4", "Suno 4"),
+            ("4.5", "Suno 4.5"),
+            ("5", "Suno 5"),
+            ("5.5", "Suno 5.5"),
+        ],
+        "intro_after_target": (
+            "✅ Версия: <b>{target}</b>\n\n"
+            "Теперь расскажи идею трека — жанр, настроение, тематику, есть ли вокал."
         ),
         "system_prompt": (
             "Ты — опытный саунд-продюсер и эксперт по составлению промптов для Suno AI "
             "(нейросеть для генерации музыки). Твоя задача — помочь пользователю составить "
             "качественный промпт. Веди диалог по существу:\n"
-            "1. Уточни версию Suno, если пользователь не назвал (это важно — от версии зависит "
-            "максимальная длина промпта и поддержка тегов структуры типа [Verse], [Chorus]).\n"
-            "2. Уточни жанр/стиль, настроение, темп, наличие и пол вокала, референсы-исполнителей, "
+            "1. Уточни жанр/стиль, настроение, темп, наличие и пол вокала, референсы-исполнителей, "
             "структуру трека (куплет/припев/бридж), нужен ли текст песни (лирика).\n"
             "Задавай не больше 1-2 уточняющих вопросов за раз, не заваливай пользователя вопросами сразу.\n"
             "Когда данных достаточно — сформируй готовый промпт для Suno (структурированный, с тегами, "
@@ -377,9 +382,15 @@ PROMPT_CONFIG = {
     },
     "image": {
         "label": "🖼 Картинка",
-        "intro": (
-            "🖼 <b>Промпт для генерации картинки</b>\n\n"
-            "Для начала: для какой нейросети промпт (Midjourney, DALL-E 3, Stable Diffusion, Flux и т.д.)?\n"
+        "target_question": "🖼 <b>Картинка</b>\n\nДля какой нейросети?",
+        "targets": [
+            ("mj", "Midjourney"),
+            ("dalle", "DALL-E 3"),
+            ("sd", "Stable Diffusion"),
+            ("flux", "Flux"),
+        ],
+        "intro_after_target": (
+            "✅ Нейросеть: <b>{target}</b>\n\n"
             "Опиши идею — что должно быть на картинке.\n\n"
             "💡 Можно и по-другому: пришли фото и подписью укажи, что в нём нужно поменять — "
             "составлю промпт под правку именно этого изображения."
@@ -387,9 +398,7 @@ PROMPT_CONFIG = {
         "system_prompt": (
             "Ты — эксперт по составлению промптов для генерации изображений через нейросети. "
             "Твоя задача — помочь пользователю составить качественный промпт. Веди диалог по существу:\n"
-            "1. Уточни, для какой именно нейросети промпт, если пользователь не сказал (Midjourney, "
-            "DALL-E 3, Stable Diffusion, Flux и др. — у них разный синтаксис и параметры).\n"
-            "2. Уточни сюжет и объект, стиль (фотореализм, аниме, живопись, 3D и т.д.), композицию, "
+            "1. Уточни сюжет и объект, стиль (фотореализм, аниме, живопись, 3D и т.д.), композицию, "
             "освещение, цветовую палитру, ракурс, соотношение сторон, дополнительные детали и настроение.\n"
             "Задавай не больше 1-2 уточняющих вопросов за раз.\n"
             "Когда данных достаточно — сформируй готовый промпт, оформленный по стандартам именно "
@@ -400,18 +409,21 @@ PROMPT_CONFIG = {
     },
     "video": {
         "label": "🎬 Видео",
-        "intro": (
-            "🎬 <b>Промпт для генерации видео</b>\n\n"
-            "Для начала: для какой нейросети промпт (Sora, Runway, Kling, Veo, Pika и т.д.)?\n"
-            "И опиши идею сцены."
+        "target_question": "🎬 <b>Видео</b>\n\nДля какой нейросети?",
+        "targets": [
+            ("sora", "Sora"),
+            ("runway", "Runway"),
+            ("kling", "Kling"),
+            ("veo", "Veo"),
+        ],
+        "intro_after_target": (
+            "✅ Нейросеть: <b>{target}</b>\n\nОпиши идею сцены."
         ),
         "system_prompt": (
             "Ты — эксперт по составлению промптов для генерации видео через нейросети "
             "(Sora, Runway, Kling, Veo, Pika и подобные). Твоя задача — помочь пользователю "
             "составить качественный промпт. Веди диалог по существу:\n"
-            "1. Уточни, для какой именно нейросети промпт, если пользователь не сказал — у них "
-            "разные ограничения по длительности, поддержка движения камеры, стилей.\n"
-            "2. Уточни сюжет сцены, движение камеры (панорама, наезд, статика и т.д.), стиль "
+            "1. Уточни сюжет сцены, движение камеры (панорама, наезд, статика и т.д.), стиль "
             "(кино, реализм, анимация), освещение, длительность, темп действия, звук/музыку если поддерживается.\n"
             "Задавай не больше 1-2 уточняющих вопросов за раз.\n"
             "Когда данных достаточно — сформируй готовый промпт под конкретную нейросеть. "
@@ -422,24 +434,39 @@ PROMPT_CONFIG = {
 }
 
 
-def prompts_submenu_keyboard(user_id: int) -> InlineKeyboardMarkup:
-    current_model = user_prompt_model.get(user_id, "groq")
-    groq_label = "✅ Groq (быстрый)" if current_model == "groq" else "⚪ Groq (быстрый)"
-    giga_label = "✅ GigaChat (RU)" if current_model == "gigachat" else "⚪ GigaChat (RU)"
-
+def prompts_submenu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text=cfg["label"], callback_data=f"prompt_{key}")]
             for key, cfg in PROMPT_CONFIG.items()
         ]
-        + [
-            [
-                InlineKeyboardButton(text=groq_label, callback_data="prompt_model_groq"),
-                InlineKeyboardButton(text=giga_label, callback_data="prompt_model_gigachat"),
-            ],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        + [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]]
+    )
+
+
+def prompt_target_keyboard(topic: str, user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура выбора версии/нейросети под конкретную тему + выбор движка ИИ."""
+    targets = PROMPT_CONFIG[topic]["targets"]
+    rows = []
+    for i in range(0, len(targets), 2):
+        row = [
+            InlineKeyboardButton(text=label, callback_data=f"ptgt_{topic}_{code}")
+            for code, label in targets[i : i + 2]
+        ]
+        rows.append(row)
+
+    current_engine = user_prompt_model.get(user_id, "groq")
+    groq_label = "✅ Groq (быстрый)" if current_engine == "groq" else "⚪ Groq (быстрый)"
+    giga_label = "✅ GigaChat (RU)" if current_engine == "gigachat" else "⚪ GigaChat (RU)"
+    rows.append(
+        [
+            InlineKeyboardButton(text=groq_label, callback_data=f"peng_groq_{topic}"),
+            InlineKeyboardButton(text=giga_label, callback_data=f"peng_gigachat_{topic}"),
         ]
     )
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")])
+
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def prompt_active_keyboard() -> InlineKeyboardMarkup:
@@ -451,18 +478,26 @@ def prompt_active_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+
 async def get_image_prompt_from_photo(user_id: int, image_base64: str, desired_change: str) -> str:
     """Анализирует присланное фото и составляет промпт для его правки в генеративной нейросети."""
     config = PROMPT_CONFIG["image"]
     history = user_prompt_histories.setdefault(user_id, [])
 
+    target = user_prompt_target.get(user_id)
+    target_note = (
+        f"Пользователь уже выбрал нейросеть: {target}. Готовый промпт формируй именно под неё, "
+        "не спрашивай про это повторно. "
+        if target
+        else ""
+    )
+
     combined_system = (
         config["system_prompt"]
         + "\n\nПользователь прислал фотографию и хочет внести в неё правки через генеративную "
-        "нейросеть. Сначала кратко опиши (для себя, но можно упомянуть в ответе), что видишь на фото, "
-        "затем следуй правилам выше: если нейросеть для генерации не указана в разговоре — уточни её, "
-        "если указана или уже понятна из контекста — сразу выдай готовый промпт под правку этого фото "
-        "с пометкой 'ГОТОВЫЙ ПРОМПТ:'."
+        "нейросеть. " + target_note + "Сначала кратко опиши (для себя, но можно упомянуть в ответе), "
+        "что видишь на фото, затем сразу выдай готовый промпт под правку этого фото с пометкой "
+        "'ГОТОВЫЙ ПРОМПТ:'."
     )
 
     trimmed_history = history[-10:]
@@ -508,7 +543,16 @@ async def get_prompt_reply(user_id: int, prompt_type: str, user_text: str) -> st
     history = user_prompt_histories.setdefault(user_id, [])
     history.append({"role": "user", "content": user_text})
     trimmed_history = history[-20:]
-    messages = [{"role": "system", "content": config["system_prompt"]}] + trimmed_history
+
+    system_content = config["system_prompt"]
+    target = user_prompt_target.get(user_id)
+    if target:
+        system_content += (
+            f"\n\nПользователь уже выбрал: {target}. Не спрашивай про версию/нейросеть повторно — "
+            "сразу переходи к остальным уточняющим вопросам, а готовый промпт формируй именно под неё."
+        )
+
+    messages = [{"role": "system", "content": system_content}] + trimmed_history
 
     model_choice = user_prompt_model.get(user_id, "groq")
     reply = await call_prompt_model(model_choice, messages)
@@ -521,6 +565,7 @@ async def get_prompt_reply(user_id: int, prompt_type: str, user_text: str) -> st
 async def cmd_menu(message: Message):
     user_translate_mode.pop(message.from_user.id, None)
     user_prompt_mode.pop(message.from_user.id, None)
+    user_prompt_target.pop(message.from_user.id, None)
     await message.answer(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
@@ -547,6 +592,7 @@ async def show_menu_screen(callback: CallbackQuery, text: str, keyboard: InlineK
 async def callback_menu_chat(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
+    user_prompt_target.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_CHAT_TEXT, back_keyboard())
 
 
@@ -555,6 +601,7 @@ async def callback_menu_translate(callback: CallbackQuery):
     # Выходим из режима перевода/промптов при повторном открытии подменю
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
+    user_prompt_target.pop(callback.from_user.id, None)
     await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard())
 
 
@@ -600,35 +647,57 @@ async def callback_menu_help(callback: CallbackQuery):
 @dp.callback_query(F.data == "menu_prompts")
 async def callback_menu_prompts(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
-    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard(callback.from_user.id))
-
-
-@dp.callback_query(F.data.in_(["prompt_model_groq", "prompt_model_gigachat"]))
-async def callback_prompt_select_model(callback: CallbackQuery):
-    chosen = "gigachat" if callback.data == "prompt_model_gigachat" else "groq"
-
-    if chosen == "gigachat" and not GIGACHAT_AUTH_KEY:
-        await callback.answer("GigaChat пока не подключен — не задан ключ.", show_alert=True)
-        return
-
-    user_prompt_model[callback.from_user.id] = chosen
-    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard(callback.from_user.id))
+    user_prompt_target.pop(callback.from_user.id, None)
+    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard())
 
 
 @dp.callback_query(F.data.in_([f"prompt_{k}" for k in PROMPT_CONFIG.keys()]))
 async def callback_prompt_select(callback: CallbackQuery):
-    prompt_type = callback.data.split("_", 1)[1]
+    """Пользователь выбрал тему (Suno/Картинка/Видео) — показываем выбор версии/нейросети."""
+    topic = callback.data.split("_", 1)[1]
     user_id = callback.from_user.id
-    user_prompt_mode[user_id] = prompt_type
+    user_prompt_mode[user_id] = topic
+    user_prompt_target.pop(user_id, None)
+    config = PROMPT_CONFIG[topic]
+    await show_menu_screen(callback, config["target_question"], prompt_target_keyboard(topic, user_id))
+
+
+@dp.callback_query(F.data.startswith("peng_"))
+async def callback_prompt_engine(callback: CallbackQuery):
+    """Переключение движка ИИ (Groq/GigaChat) на экране выбора версии/нейросети."""
+    _, engine, topic = callback.data.split("_", 2)
+    user_id = callback.from_user.id
+
+    if engine == "gigachat" and not GIGACHAT_AUTH_KEY:
+        await callback.answer("GigaChat пока не подключен — не задан ключ.", show_alert=True)
+        return
+
+    user_prompt_model[user_id] = engine
+    config = PROMPT_CONFIG[topic]
+    await show_menu_screen(callback, config["target_question"], prompt_target_keyboard(topic, user_id))
+
+
+@dp.callback_query(F.data.startswith("ptgt_"))
+async def callback_prompt_target(callback: CallbackQuery):
+    """Пользователь выбрал версию/нейросеть — начинаем диалог по существу."""
+    _, topic, code = callback.data.split("_", 2)
+    user_id = callback.from_user.id
+    config = PROMPT_CONFIG[topic]
+
+    target_label = next((label for c, label in config["targets"] if c == code), code)
+    user_prompt_target[user_id] = target_label
+    user_prompt_mode[user_id] = topic
     user_prompt_histories[user_id] = []  # начинаем тему с чистого листа
-    config = PROMPT_CONFIG[prompt_type]
-    await show_menu_screen(callback, config["intro"], prompt_active_keyboard())
+
+    intro = config["intro_after_target"].format(target=target_label)
+    await show_menu_screen(callback, intro, prompt_active_keyboard())
 
 
 @dp.callback_query(F.data == "menu_back")
 async def callback_menu_back(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
+    user_prompt_target.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_MAIN_TEXT, main_menu_keyboard())
 
 
@@ -640,6 +709,7 @@ async def cmd_start(message: Message):
     user_histories[message.from_user.id] = []
     user_translate_mode.pop(message.from_user.id, None)
     user_prompt_mode.pop(message.from_user.id, None)
+    user_prompt_target.pop(message.from_user.id, None)
 
     if os.path.exists(WELCOME_IMAGE):
         photo = FSInputFile(WELCOME_IMAGE)
