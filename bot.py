@@ -240,20 +240,35 @@ async def cmd_menu(message: Message):
     await message.answer(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
+async def show_menu_screen(callback: CallbackQuery, text: str, keyboard: InlineKeyboardMarkup):
+    """Показывает экран меню. Если исходное сообщение — фото (например, из /start),
+    редактировать его текст нельзя, поэтому удаляем и присылаем новое текстовое сообщение."""
+    try:
+        if callback.message.photo:
+            await callback.message.delete()
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        else:
+            await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    except Exception:
+        logging.exception("Ошибка при обновлении экрана меню")
+        try:
+            await callback.message.answer(text, reply_markup=keyboard, parse_mode="HTML")
+        except Exception:
+            logging.exception("Не удалось отправить меню даже отдельным сообщением")
+    finally:
+        await callback.answer()
+
+
 @dp.callback_query(F.data == "menu_chat")
 async def callback_menu_chat(callback: CallbackQuery):
-    await callback.message.edit_text(MENU_CHAT_TEXT, reply_markup=back_keyboard(), parse_mode="HTML")
-    await callback.answer()
+    await show_menu_screen(callback, MENU_CHAT_TEXT, back_keyboard())
 
 
 @dp.callback_query(F.data == "menu_translate")
 async def callback_menu_translate(callback: CallbackQuery):
     # Выходим из режима перевода при повторном открытии подменю (например, чтобы сменить язык)
     user_translate_mode.pop(callback.from_user.id, None)
-    await callback.message.edit_text(
-        TRANSLATE_SUBMENU_TEXT, reply_markup=translate_submenu_keyboard(), parse_mode="HTML"
-    )
-    await callback.answer()
+    await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard())
 
 
 @dp.callback_query(F.data.in_(["tr_lang_en", "tr_lang_fr", "tr_lang_de"]))
@@ -261,49 +276,44 @@ async def callback_translate_quick_lang(callback: CallbackQuery):
     lang_code = callback.data.split("_")[-1]
     lang_name = QUICK_LANGUAGES[lang_code]
     user_translate_mode[callback.from_user.id] = {"target_lang": lang_code}
-    await callback.message.edit_text(
+    await show_menu_screen(
+        callback,
         f"✅ Режим перевода на <b>{lang_name}</b> включён.\n\nПросто присылай текст — переведу.",
-        reply_markup=translate_active_keyboard(),
-        parse_mode="HTML",
+        translate_active_keyboard(),
     )
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "tr_lang_auto")
 async def callback_translate_auto(callback: CallbackQuery):
     user_translate_mode[callback.from_user.id] = {"target_lang": None}
-    await callback.message.edit_text(
+    await show_menu_screen(
+        callback,
         "✅ Режим <b>автоопределения</b> включён (RU→EN, другой язык→RU).\n\n"
         "Просто присылай текст — переведу.",
-        reply_markup=translate_active_keyboard(),
-        parse_mode="HTML",
+        translate_active_keyboard(),
     )
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "tr_lang_custom")
 async def callback_translate_custom(callback: CallbackQuery):
     user_translate_mode[callback.from_user.id] = {"awaiting_custom_lang": True}
-    await callback.message.edit_text(
+    await show_menu_screen(
+        callback,
         "⌨️ Напиши, на какой язык переводить.\n"
         "Можно и код (es, ja, pt), и название (испанский, japanese).",
-        reply_markup=translate_active_keyboard(),
-        parse_mode="HTML",
+        translate_active_keyboard(),
     )
-    await callback.answer()
 
 
 @dp.callback_query(F.data == "menu_help")
 async def callback_menu_help(callback: CallbackQuery):
-    await callback.message.edit_text(MENU_HELP_TEXT, reply_markup=back_keyboard(), parse_mode="HTML")
-    await callback.answer()
+    await show_menu_screen(callback, MENU_HELP_TEXT, back_keyboard())
 
 
 @dp.callback_query(F.data == "menu_back")
 async def callback_menu_back(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
-    await callback.message.edit_text(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
-    await callback.answer()
+    await show_menu_screen(callback, MENU_MAIN_TEXT, main_menu_keyboard())
 
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
