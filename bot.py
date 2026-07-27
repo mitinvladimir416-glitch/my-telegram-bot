@@ -55,11 +55,14 @@ SYSTEM_PROMPT = "Ты дружелюбный ассистент, отвечай 
 WELCOME_IMAGE = "welcome.jpg"
 WELCOME_TEXT = (
     "🤖 <b>ЙО! ДОБРО ПОЖАЛОВАТЬ В МИР БОТЯРЫ!</b>\n\n"
-    "Ты нажал /start — а значит, обратной дороги нет 😈\n\n"
-    "Тут можно:\n"
-    "💬 Просто общаться — отвечу на любой вопрос\n"
-    "🎤 Скидывать войсы — слушаю внимательно\n"
-    "📸 Кидать фотки — разберу, что на них\n\n"
+    "Нажал старт — красавчик, теперь ты в деле 😈\n\n"
+    "Что я умею:\n"
+    "💬 Шарю за любые темы — просто пиши\n"
+    "🎤 Понимаю войсы — шли голосом\n"
+    "📸 Разбираю фотки — гружу, вижу, отвечаю\n"
+    "🌐 Шпарю переводы на любой язык\n"
+    "🎨 Собираю крутые промпты — для музыки в Suno, картинок и видео. "
+    "Скажи, что хочешь получить, и я выкачу готовый промпт под нужную нейронку\n\n"
     "Погнали, я на связи 24/7 🔥\n"
     "Выбирай режим прямо в меню ниже 👇"
 )
@@ -169,12 +172,17 @@ def describe_groq_error(e: Exception) -> str:
 # Храним, у кого сейчас включён режим перевода в чате (и на какой язык)
 user_translate_mode: dict[int, dict] = {}
 
+# Храним, у кого сейчас включён режим составления промптов (и историю диалога по теме)
+user_prompt_mode: dict[int, str] = {}  # user_id -> "suno" / "image" / "video"
+user_prompt_histories: dict[int, list] = {}
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="💬 Общение", callback_data="menu_chat")],
             [InlineKeyboardButton(text="🌐 Переводчик", callback_data="menu_translate")],
+            [InlineKeyboardButton(text="🎨 Промпты", callback_data="menu_prompts")],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu_help")],
         ]
     )
@@ -234,9 +242,175 @@ def translate_active_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+# ==================== РАЗДЕЛ "ПРОМПТЫ" ====================
+
+PROMPTS_SUBMENU_TEXT = "🎨 <b>Помощник по промптам</b>\n\nВыбери направление:"
+
+PROMPT_CONFIG = {
+    "suno": {
+        "label": "🎵 Suno (музыка)",
+        "intro": (
+            "🎵 <b>Промпт для Suno</b>\n\n"
+            "Для начала: под какую версию Suno делаем промпт (4, 4.5, 5, 5.5 и т.д.)?\n"
+            "И расскажи идею трека — жанр, настроение, тематику, есть ли вокал."
+        ),
+        "system_prompt": (
+            "Ты — опытный саунд-продюсер и эксперт по составлению промптов для Suno AI "
+            "(нейросеть для генерации музыки). Твоя задача — помочь пользователю составить "
+            "качественный промпт. Веди диалог по существу:\n"
+            "1. Уточни версию Suno, если пользователь не назвал (это важно — от версии зависит "
+            "максимальная длина промпта и поддержка тегов структуры типа [Verse], [Chorus]).\n"
+            "2. Уточни жанр/стиль, настроение, темп, наличие и пол вокала, референсы-исполнителей, "
+            "структуру трека (куплет/припев/бридж), нужен ли текст песни (лирика).\n"
+            "Задавай не больше 1-2 уточняющих вопросов за раз, не заваливай пользователя вопросами сразу.\n"
+            "Когда данных достаточно — сформируй готовый промпт для Suno (структурированный, с тегами, "
+            "если версия их поддерживает) и обязательно начни этот момент строкой 'ГОТОВЫЙ ПРОМПТ:' "
+            "на отдельной строке, дальше сам промпт. Отвечай на русском, но сам текст промпта пиши "
+            "так, как эффективнее для Suno (обычно это английский для тегов стиля)."
+        ),
+    },
+    "image": {
+        "label": "🖼 Картинка",
+        "intro": (
+            "🖼 <b>Промпт для генерации картинки</b>\n\n"
+            "Для начала: для какой нейросети промпт (Midjourney, DALL-E 3, Stable Diffusion, Flux и т.д.)?\n"
+            "Опиши идею — что должно быть на картинке.\n\n"
+            "💡 Можно и по-другому: пришли фото и подписью укажи, что в нём нужно поменять — "
+            "составлю промпт под правку именно этого изображения."
+        ),
+        "system_prompt": (
+            "Ты — эксперт по составлению промптов для генерации изображений через нейросети. "
+            "Твоя задача — помочь пользователю составить качественный промпт. Веди диалог по существу:\n"
+            "1. Уточни, для какой именно нейросети промпт, если пользователь не сказал (Midjourney, "
+            "DALL-E 3, Stable Diffusion, Flux и др. — у них разный синтаксис и параметры).\n"
+            "2. Уточни сюжет и объект, стиль (фотореализм, аниме, живопись, 3D и т.д.), композицию, "
+            "освещение, цветовую палитру, ракурс, соотношение сторон, дополнительные детали и настроение.\n"
+            "Задавай не больше 1-2 уточняющих вопросов за раз.\n"
+            "Когда данных достаточно — сформируй готовый промпт, оформленный по стандартам именно "
+            "выбранной нейросети (для Midjourney — с параметрами --ar --v --style и т.д., если уместно). "
+            "Обязательно начни этот момент строкой 'ГОТОВЫЙ ПРОМПТ:' на отдельной строке, дальше сам "
+            "промпт. Отвечай на русском, промпт можно писать на английском, если так эффективнее."
+        ),
+    },
+    "video": {
+        "label": "🎬 Видео",
+        "intro": (
+            "🎬 <b>Промпт для генерации видео</b>\n\n"
+            "Для начала: для какой нейросети промпт (Sora, Runway, Kling, Veo, Pika и т.д.)?\n"
+            "И опиши идею сцены."
+        ),
+        "system_prompt": (
+            "Ты — эксперт по составлению промптов для генерации видео через нейросети "
+            "(Sora, Runway, Kling, Veo, Pika и подобные). Твоя задача — помочь пользователю "
+            "составить качественный промпт. Веди диалог по существу:\n"
+            "1. Уточни, для какой именно нейросети промпт, если пользователь не сказал — у них "
+            "разные ограничения по длительности, поддержка движения камеры, стилей.\n"
+            "2. Уточни сюжет сцены, движение камеры (панорама, наезд, статика и т.д.), стиль "
+            "(кино, реализм, анимация), освещение, длительность, темп действия, звук/музыку если поддерживается.\n"
+            "Задавай не больше 1-2 уточняющих вопросов за раз.\n"
+            "Когда данных достаточно — сформируй готовый промпт под конкретную нейросеть. "
+            "Обязательно начни этот момент строкой 'ГОТОВЫЙ ПРОМПТ:' на отдельной строке, дальше сам "
+            "промпт. Отвечай на русском, промпт можно писать на английском, если так эффективнее."
+        ),
+    },
+}
+
+
+def prompts_submenu_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=cfg["label"], callback_data=f"prompt_{key}")]
+            for key, cfg in PROMPT_CONFIG.items()
+        ]
+        + [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]]
+    )
+
+
+def prompt_active_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ Сменить тему / Выйти", callback_data="menu_prompts")]]
+    )
+
+
+async def get_image_prompt_from_photo(user_id: int, image_base64: str, desired_change: str) -> str:
+    """Анализирует присланное фото и составляет промпт для его правки в генеративной нейросети."""
+    config = PROMPT_CONFIG["image"]
+    history = user_prompt_histories.setdefault(user_id, [])
+
+    combined_system = (
+        config["system_prompt"]
+        + "\n\nПользователь прислал фотографию и хочет внести в неё правки через генеративную "
+        "нейросеть. Сначала кратко опиши (для себя, но можно упомянуть в ответе), что видишь на фото, "
+        "затем следуй правилам выше: если нейросеть для генерации не указана в разговоре — уточни её, "
+        "если указана или уже понятна из контекста — сразу выдай готовый промпт под правку этого фото "
+        "с пометкой 'ГОТОВЫЙ ПРОМПТ:'."
+    )
+
+    trimmed_history = history[-10:]
+    messages = (
+        [{"role": "system", "content": combined_system}]
+        + trimmed_history
+        + [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"Хочу изменить в этом фото: {desired_change}"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"},
+                    },
+                ],
+            }
+        ]
+    )
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2048,
+            reasoning_format="hidden",
+        )
+        reply = clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при анализе фото для промпта")
+        reply = describe_groq_error(e)
+
+    # В историю добавляем текстовый след, чтобы дальнейшие уточнения помнили контекст
+    history.append({"role": "user", "content": f"[Прислал фото] Хочу изменить: {desired_change}"})
+    history.append({"role": "assistant", "content": reply})
+    return reply
+
+
+
+    """Ведёт диалог по составлению промпта в выбранной теме (suno/image/video)."""
+    config = PROMPT_CONFIG[prompt_type]
+    history = user_prompt_histories.setdefault(user_id, [])
+    history.append({"role": "user", "content": user_text})
+    trimmed_history = history[-20:]
+    messages = [{"role": "system", "content": config["system_prompt"]}] + trimmed_history
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1500,
+        )
+        reply = clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при составлении промпта")
+        reply = describe_groq_error(e)
+
+    history.append({"role": "assistant", "content": reply})
+    return reply
+
+
 @dp.message(F.text == "/menu")
 async def cmd_menu(message: Message):
     user_translate_mode.pop(message.from_user.id, None)
+    user_prompt_mode.pop(message.from_user.id, None)
     await message.answer(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
@@ -261,13 +435,16 @@ async def show_menu_screen(callback: CallbackQuery, text: str, keyboard: InlineK
 
 @dp.callback_query(F.data == "menu_chat")
 async def callback_menu_chat(callback: CallbackQuery):
+    user_translate_mode.pop(callback.from_user.id, None)
+    user_prompt_mode.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_CHAT_TEXT, back_keyboard())
 
 
 @dp.callback_query(F.data == "menu_translate")
 async def callback_menu_translate(callback: CallbackQuery):
-    # Выходим из режима перевода при повторном открытии подменю (например, чтобы сменить язык)
+    # Выходим из режима перевода/промптов при повторном открытии подменю
     user_translate_mode.pop(callback.from_user.id, None)
+    user_prompt_mode.pop(callback.from_user.id, None)
     await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard())
 
 
@@ -310,9 +487,26 @@ async def callback_menu_help(callback: CallbackQuery):
     await show_menu_screen(callback, MENU_HELP_TEXT, back_keyboard())
 
 
+@dp.callback_query(F.data == "menu_prompts")
+async def callback_menu_prompts(callback: CallbackQuery):
+    user_prompt_mode.pop(callback.from_user.id, None)
+    await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard())
+
+
+@dp.callback_query(F.data.in_([f"prompt_{k}" for k in PROMPT_CONFIG.keys()]))
+async def callback_prompt_select(callback: CallbackQuery):
+    prompt_type = callback.data.split("_", 1)[1]
+    user_id = callback.from_user.id
+    user_prompt_mode[user_id] = prompt_type
+    user_prompt_histories[user_id] = []  # начинаем тему с чистого листа
+    config = PROMPT_CONFIG[prompt_type]
+    await show_menu_screen(callback, config["intro"], prompt_active_keyboard())
+
+
 @dp.callback_query(F.data == "menu_back")
 async def callback_menu_back(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
+    user_prompt_mode.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_MAIN_TEXT, main_menu_keyboard())
 
 
@@ -323,6 +517,7 @@ async def cmd_start(message: Message):
     register_user(message.from_user.id)
     user_histories[message.from_user.id] = []
     user_translate_mode.pop(message.from_user.id, None)
+    user_prompt_mode.pop(message.from_user.id, None)
 
     if os.path.exists(WELCOME_IMAGE):
         photo = FSInputFile(WELCOME_IMAGE)
@@ -535,6 +730,21 @@ async def handle_message(message: Message):
         await message.answer(f"🌐 {translation}", reply_markup=translate_active_keyboard())
         return
 
+    # Если у пользователя включён режим составления промптов — ведём диалог по теме
+    prompt_type = user_prompt_mode.get(user_id)
+    if prompt_type is not None:
+        if is_rate_limited(user_id):
+            await message.answer(
+                f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
+                f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+            )
+            return
+
+        await bot.send_chat_action(message.chat.id, "typing")
+        reply = await get_prompt_reply(user_id, prompt_type, message.text)
+        await message.answer(reply, reply_markup=prompt_active_keyboard())
+        return
+
     if is_rate_limited(user_id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
@@ -616,6 +826,20 @@ async def handle_photo(message: Message):
             image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
     finally:
         os.remove(tmp_path)
+
+    # Если у пользователя включён режим составления промпта для картинки —
+    # обрабатываем фото как запрос на правку через генеративную нейросеть
+    if user_prompt_mode.get(message.from_user.id) == "image":
+        if not message.caption:
+            await message.answer(
+                "Пришли это фото ещё раз, но с подписью — опиши, что именно хочешь в нём поменять 🙂",
+                reply_markup=prompt_active_keyboard(),
+            )
+            return
+
+        reply = await get_image_prompt_from_photo(message.from_user.id, image_base64, message.caption)
+        await message.answer(reply, reply_markup=prompt_active_keyboard())
+        return
 
     # Если есть подпись к фото — используем её как вопрос, иначе просим просто описать
     question = message.caption if message.caption else "Опиши, что изображено на этой картинке."
