@@ -6,8 +6,6 @@ import os
 import re
 import tempfile
 import time
-import uuid
-import requests
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -26,7 +24,6 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")  # твой Telegram ID — только ты сможешь делать рассылку
-GIGACHAT_AUTH_KEY = os.getenv("GIGACHAT_AUTH_KEY")  # Authorization key из Sber Studio
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError(
@@ -190,72 +187,8 @@ def describe_groq_error(e: Exception) -> str:
     return "Произошла непредвиденная ошибка. Попробуй ещё раз."
 
 
-# ==================== GIGACHAT (только для раздела "Промпты") ====================
-
-GIGACHAT_OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth"
-GIGACHAT_CHAT_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions"
-
-_gigachat_token = {"value": None, "expires_at": 0}
-
-
-def get_gigachat_token() -> str:
-    """Получает (и кэширует на ~28 минут) токен доступа GigaChat."""
-    if _gigachat_token["value"] and time.time() < _gigachat_token["expires_at"]:
-        return _gigachat_token["value"]
-
-    response = requests.post(
-        GIGACHAT_OAUTH_URL,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Accept": "application/json",
-            "RqUID": str(uuid.uuid4()),
-            "Authorization": f"Basic {GIGACHAT_AUTH_KEY}",
-        },
-        data={"scope": "GIGACHAT_API_PERS"},
-        verify=False,  # у GigaChat используется российский корневой сертификат
-        timeout=15,
-    )
-    response.raise_for_status()
-    data = response.json()
-    _gigachat_token["value"] = data["access_token"]
-    # Токен живёт 30 минут, обновляем чуть раньше на всякий случай
-    _gigachat_token["expires_at"] = time.time() + 28 * 60
-    return _gigachat_token["value"]
-
-
-def gigachat_chat_completion(messages: list) -> str:
-    """Отправляет сообщения в GigaChat и возвращает текст ответа (синхронная функция)."""
-    token = get_gigachat_token()
-    response = requests.post(
-        GIGACHAT_CHAT_URL,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "Authorization": f"Bearer {token}",
-        },
-        json={"model": "GigaChat", "messages": messages, "temperature": 0.7},
-        verify=False,
-        timeout=60,
-    )
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
-
-
-async def call_prompt_model(model_choice: str, messages: list) -> str:
-    """Единая точка вызова нейросети для раздела 'Промпты' — Groq или GigaChat."""
-    if model_choice == "gigachat":
-        if not GIGACHAT_AUTH_KEY:
-            return "GigaChat пока не настроен (нет ключа). Переключись на обычную модель в меню."
-        try:
-            # requests — синхронная библиотека, выполняем в отдельном потоке, чтобы не блокировать бота
-            reply = await asyncio.to_thread(gigachat_chat_completion, messages)
-            return clean_reply(reply)
-        except Exception as e:
-            logging.exception("Ошибка при обращении к GigaChat")
-            return "Не удалось получить ответ от GigaChat. Попробуй ещё раз или переключись на другую модель."
-
-    # По умолчанию — Groq
+async def call_prompt_model(messages: list) -> str:
+    """Вызов нейросети для раздела 'Промпты' (Groq)."""
     try:
         response = groq_client.chat.completions.create(
             model=MODEL,
@@ -277,7 +210,6 @@ user_translate_mode: dict[int, dict] = {}
 # Храним, у кого сейчас включён режим составления промптов (и историю диалога по теме)
 user_prompt_mode: dict[int, str] = {}  # user_id -> "suno" / "image" / "video"
 user_prompt_histories: dict[int, list] = {}
-user_prompt_model: dict[int, str] = {}  # user_id -> "groq" / "gigachat", по умолчанию groq
 user_prompt_target: dict[int, str] = {}  # user_id -> выбранная версия/нейросеть (текст для показа)
 
 
@@ -444,8 +376,8 @@ def prompts_submenu_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-def prompt_target_keyboard(topic: str, user_id: int) -> InlineKeyboardMarkup:
-    """Клавиатура выбора версии/нейросети под конкретную тему + выбор движка ИИ."""
+def prompt_target_keyboard(topic: str) -> InlineKeyboardMarkup:
+    """Клавиатура выбора версии/нейросети под конкретную тему."""
     targets = PROMPT_CONFIG[topic]["targets"]
     rows = []
     for i in range(0, len(targets), 2):
@@ -455,15 +387,6 @@ def prompt_target_keyboard(topic: str, user_id: int) -> InlineKeyboardMarkup:
         ]
         rows.append(row)
 
-    current_engine = user_prompt_model.get(user_id, "groq")
-    groq_label = "✅ Groq (быстрый)" if current_engine == "groq" else "⚪ Groq (быстрый)"
-    giga_label = "✅ GigaChat (RU)" if current_engine == "gigachat" else "⚪ GigaChat (RU)"
-    rows.append(
-        [
-            InlineKeyboardButton(text=groq_label, callback_data=f"peng_groq_{topic}"),
-            InlineKeyboardButton(text=giga_label, callback_data=f"peng_gigachat_{topic}"),
-        ]
-    )
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -554,8 +477,7 @@ async def get_prompt_reply(user_id: int, prompt_type: str, user_text: str) -> st
 
     messages = [{"role": "system", "content": system_content}] + trimmed_history
 
-    model_choice = user_prompt_model.get(user_id, "groq")
-    reply = await call_prompt_model(model_choice, messages)
+    reply = await call_prompt_model(messages)
 
     history.append({"role": "assistant", "content": reply})
     return reply
@@ -659,22 +581,7 @@ async def callback_prompt_select(callback: CallbackQuery):
     user_prompt_mode[user_id] = topic
     user_prompt_target.pop(user_id, None)
     config = PROMPT_CONFIG[topic]
-    await show_menu_screen(callback, config["target_question"], prompt_target_keyboard(topic, user_id))
-
-
-@dp.callback_query(F.data.startswith("peng_"))
-async def callback_prompt_engine(callback: CallbackQuery):
-    """Переключение движка ИИ (Groq/GigaChat) на экране выбора версии/нейросети."""
-    _, engine, topic = callback.data.split("_", 2)
-    user_id = callback.from_user.id
-
-    if engine == "gigachat" and not GIGACHAT_AUTH_KEY:
-        await callback.answer("GigaChat пока не подключен — не задан ключ.", show_alert=True)
-        return
-
-    user_prompt_model[user_id] = engine
-    config = PROMPT_CONFIG[topic]
-    await show_menu_screen(callback, config["target_question"], prompt_target_keyboard(topic, user_id))
+    await show_menu_screen(callback, config["target_question"], prompt_target_keyboard(topic))
 
 
 @dp.callback_query(F.data.startswith("ptgt_"))
