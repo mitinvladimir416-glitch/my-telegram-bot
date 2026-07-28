@@ -240,6 +240,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="💬 Общение", callback_data="menu_chat")],
             [InlineKeyboardButton(text="🌐 Переводчик", callback_data="menu_translate")],
             [InlineKeyboardButton(text="🎨 Промпты", callback_data="menu_prompts")],
+            [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu_help")],
         ]
     )
@@ -393,10 +394,7 @@ def prompts_submenu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=cfg["label"], callback_data=f"prompt_{key}")]
             for key, cfg in PROMPT_CONFIG.items()
         ]
-        + [
-            [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
-        ]
+        + [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]]
     )
 
 
@@ -522,7 +520,16 @@ COVER_PHOTO_CHOICE_TEXT = (
 
 COVER_AWAITING_PHOTO_TEXT = "📸 Пришли фото — или нажми кнопку ниже, чтобы продолжить без него."
 
+COVER_TEXT_CHOICE_TEXT = (
+    "✅ Принято.\n\n"
+    "Нужен ли текст на самой обложке (например, название трека и/или имя исполнителя)?"
+)
+
+COVER_AWAITING_TEXT_TEXT = "✏️ Напиши текст, который должен быть на обложке (например: название трека — исполнитель)."
+
 COVER_FORMAT_TEXT = "📐 Теперь выбери формат обложки:"
+
+COVER_PROMPT_FOOTER = "\n\n💡 Промпт составлен для ChatGPT Image 2"
 
 # Форматы: код -> (aspect ratio для промпта, подпись для кнопки)
 COVER_FORMATS = {
@@ -536,12 +543,16 @@ COVER_FORMATS = {
 COVER_SYSTEM_PROMPT = (
     "Ты — эксперт по составлению промптов для генерации обложек музыкальных треков в модели "
     "ChatGPT Image 2 (нейросеть OpenAI для генерации изображений). Тебе присылают текст песни "
-    "(лирику), возможно — референсное фото, и нужное соотношение сторон обложки. Твоя задача:\n"
+    "(лирику), возможно — референсное фото, возможно — текст для размещения на обложке (название "
+    "трека/исполнителя), и нужное соотношение сторон обложки. Твоя задача:\n"
     "1. Проанализируй текст песни — определи настроение, тематику, ключевые образы и символы.\n"
     "2. Если есть референсное фото — учти его стиль, цветовую палитру, композицию.\n"
     "3. Составь единый выразительный промпт для обложки: визуальная композиция, художественный стиль "
     "(фотореализм/иллюстрация/абстракция и т.д.), цветовая палитра, настроение, ключевые визуальные "
-    "элементы. Обложка не должна содержать текст/буквы, если явно не указано иное.\n"
+    "элементы.\n"
+    "4. Если пользователь указал текст для обложки — обязательно включи в промпт точную инструкцию "
+    "разместить именно этот текст (шрифт, расположение). Если текста нет — обложка должна быть БЕЗ "
+    "текста и букв.\n"
     "Сначала коротко (1-2 предложения на русском) опиши, какое настроение считал из лирики. "
     "Затем сразу выдай готовый промпт под пометкой 'ГОТОВЫЙ ПРОМПТ:' на отдельной строке — "
     "сам промпт пиши на английском (так эффективнее для генерации), обязательно укажи в конце "
@@ -551,7 +562,7 @@ COVER_SYSTEM_PROMPT = (
 
 def cover_back_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")]]
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]]
     )
 
 
@@ -560,7 +571,7 @@ def cover_photo_choice_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [InlineKeyboardButton(text="📸 Да, пришлю фото", callback_data="cover_photo_yes")],
             [InlineKeyboardButton(text="⏭ Без фото", callback_data="cover_photo_no")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
         ]
     )
 
@@ -569,7 +580,26 @@ def cover_awaiting_photo_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="⏭ Продолжить без фото", callback_data="cover_photo_no")],
-            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+def cover_text_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✏️ Указать текст", callback_data="cover_text_yes")],
+            [InlineKeyboardButton(text="🚫 Без текста", callback_data="cover_text_no")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+def cover_awaiting_text_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🚫 Передумал, без текста", callback_data="cover_text_no")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
         ]
     )
 
@@ -583,7 +613,7 @@ def cover_format_keyboard() -> InlineKeyboardMarkup:
             for c in codes[i : i + 2]
         ]
         rows.append(row)
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -596,9 +626,15 @@ def cover_result_keyboard() -> InlineKeyboardMarkup:
     )
 
 
-async def generate_cover_prompt(lyrics: str, photo_base64: str | None, ratio: str) -> str:
+async def generate_cover_prompt(
+    lyrics: str, photo_base64: str | None, ratio: str, cover_text: str | None
+) -> str:
     """Анализирует текст песни (и фото, если есть) и составляет промпт для обложки трека."""
     user_content_text = f"Текст песни:\n{lyrics}\n\nНужное соотношение сторон: {ratio}"
+    if cover_text:
+        user_content_text += f"\n\nТекст, который должен быть на обложке: {cover_text}"
+    else:
+        user_content_text += "\n\nТекста на обложке быть не должно."
 
     if photo_base64:
         messages = [
@@ -632,10 +668,12 @@ async def generate_cover_prompt(lyrics: str, photo_base64: str | None, ratio: st
             max_tokens=1500,
             **extra_kwargs,
         )
-        return clean_reply(response.choices[0].message.content)
+        reply = clean_reply(response.choices[0].message.content)
     except Exception as e:
         logging.exception("Ошибка при составлении промпта обложки")
         return describe_groq_error(e)
+
+    return reply + COVER_PROMPT_FOOTER
 
 
 
@@ -760,8 +798,31 @@ async def callback_cover_photo_no(callback: CallbackQuery):
     if not state:
         await callback.answer("Сессия сброшена, начни заново через меню.", show_alert=True)
         return
-    state["step"] = "format"
+    state["step"] = "text_choice"
     state.pop("photo_base64", None)
+    await show_menu_screen(callback, COVER_TEXT_CHOICE_TEXT, cover_text_choice_keyboard())
+
+
+@dp.callback_query(F.data == "cover_text_yes")
+async def callback_cover_text_yes(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_cover_state.get(user_id)
+    if not state:
+        await callback.answer("Сессия сброшена, начни заново через меню.", show_alert=True)
+        return
+    state["step"] = "awaiting_text"
+    await show_menu_screen(callback, COVER_AWAITING_TEXT_TEXT, cover_awaiting_text_keyboard())
+
+
+@dp.callback_query(F.data == "cover_text_no")
+async def callback_cover_text_no(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_cover_state.get(user_id)
+    if not state:
+        await callback.answer("Сессия сброшена, начни заново через меню.", show_alert=True)
+        return
+    state["step"] = "format"
+    state.pop("cover_text", None)
     await show_menu_screen(callback, COVER_FORMAT_TEXT, cover_format_keyboard())
 
 
@@ -789,8 +850,9 @@ async def callback_cover_format(callback: CallbackQuery):
     chat_id = callback.message.chat.id
     lyrics = state["lyrics"]
     photo_base64 = state.get("photo_base64")
+    cover_text = state.get("cover_text")
 
-    reply = await with_typing(chat_id, generate_cover_prompt(lyrics, photo_base64, ratio))
+    reply = await with_typing(chat_id, generate_cover_prompt(lyrics, photo_base64, ratio, cover_text))
     user_cover_state.pop(user_id, None)
     await send_prompt_reply(chat_id, reply, cover_result_keyboard())
 
@@ -1051,6 +1113,10 @@ async def handle_message(message: Message):
                 "Пришли именно фото 📸 — или нажми кнопку, чтобы продолжить без него.",
                 reply_markup=cover_awaiting_photo_keyboard(),
             )
+        elif step == "awaiting_text":
+            cover_state["cover_text"] = message.text
+            cover_state["step"] = "format"
+            await message.answer(COVER_FORMAT_TEXT, reply_markup=cover_format_keyboard())
         else:
             await message.answer("Выбери один из вариантов кнопками выше 👆")
         return
@@ -1180,8 +1246,8 @@ async def handle_photo(message: Message):
     cover_state = user_cover_state.get(message.from_user.id)
     if cover_state is not None and cover_state.get("step") == "awaiting_photo":
         cover_state["photo_base64"] = image_base64
-        cover_state["step"] = "format"
-        await message.answer(COVER_FORMAT_TEXT, reply_markup=cover_format_keyboard())
+        cover_state["step"] = "text_choice"
+        await message.answer(COVER_TEXT_CHOICE_TEXT, reply_markup=cover_text_choice_keyboard())
         return
 
     # Если у пользователя включён режим составления промпта для картинки —
