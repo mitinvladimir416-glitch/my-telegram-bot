@@ -39,6 +39,7 @@ MODEL = "openai/gpt-oss-120b"
 VISION_MODEL = "qwen/qwen3.6-27b"
 HISTORY_FILE = "history.json"
 USERS_FILE = "users.json"
+FAVORITES_FILE = "favorites.json"
 
 # Лимит: не больше RATE_LIMIT_COUNT запросов за RATE_LIMIT_WINDOW секунд на пользователя
 RATE_LIMIT_COUNT = 5
@@ -75,17 +76,27 @@ async def with_typing(chat_id: int, coro, action: str = "typing"):
 
 async def send_prompt_reply(chat_id: int, reply_text: str, keyboard: InlineKeyboardMarkup):
     """Отправляет ответ из раздела 'Промпты'. Если это финальный готовый промпт —
-    сначала на 3-4 секунды показывает стикер (для эффектности), потом удаляет его."""
-    if "ГОТОВЫЙ ПРОМПТ:" in reply_text and PROMPT_STICKER_ID:
-        try:
-            sticker_message = await bot.send_sticker(chat_id, PROMPT_STICKER_ID)
-            await asyncio.sleep(3.5)
+    сначала на 3-4 секунды показывает стикер (для эффектности), потом удаляет его,
+    и добавляет кнопку 'Сохранить в избранное'."""
+    is_final = "ГОТОВЫЙ ПРОМПТ:" in reply_text
+
+    if is_final:
+        user_last_prompt[chat_id] = reply_text
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="⭐ Сохранить в избранное", callback_data="fav_save")]]
+            + keyboard.inline_keyboard
+        )
+
+        if PROMPT_STICKER_ID:
             try:
-                await bot.delete_message(chat_id, sticker_message.message_id)
+                sticker_message = await bot.send_sticker(chat_id, PROMPT_STICKER_ID)
+                await asyncio.sleep(3.5)
+                try:
+                    await bot.delete_message(chat_id, sticker_message.message_id)
+                except Exception:
+                    logging.exception("Не удалось удалить стикер после показа")
             except Exception:
-                logging.exception("Не удалось удалить стикер после показа")
-        except Exception:
-            logging.exception("Не удалось отправить стикер перед промптом")
+                logging.exception("Не удалось отправить стикер перед промптом")
 
     await bot.send_message(chat_id, reply_text, reply_markup=keyboard)
 
@@ -156,9 +167,29 @@ def register_user(user_id: int):
         save_users()
 
 
+def load_favorites() -> dict:
+    """Загружает сохранённые промпты пользователей из файла."""
+    raw = load_json_file(FAVORITES_FILE, {})
+    return {int(k): v for k, v in raw.items()}
+
+
+def save_favorites():
+    """Сохраняет избранные промпты в файл."""
+    try:
+        with open(FAVORITES_FILE, "w", encoding="utf-8") as f:
+            json.dump(user_favorites, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.exception(f"НЕ УДАЛОСЬ сохранить избранное: {e}")
+
+
 # Память диалога и список пользователей — подгружаются из файлов при старте
 user_histories = load_histories()
 registered_users = load_users()
+user_favorites = load_favorites()  # user_id -> список сохранённых промптов
+
+# Храним последний сгенерированный промпт каждого пользователя — чтобы кнопка
+# "Сохранить в избранное" знала, что именно сохранять (в файл не пишем, это временное)
+user_last_prompt: dict[int, str] = {}
 
 # Подтягиваем в список рассылки всех, кто уже есть в истории переписки
 # (важно после обновления бота, когда users.json ещё не существовал)
@@ -280,8 +311,17 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🌐 Переводчик", callback_data="menu_translate")],
             [InlineKeyboardButton(text="🎨 Промпты", callback_data="menu_prompts")],
             [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
+            [InlineKeyboardButton(text="⭐ Избранное", callback_data="menu_favorites")],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu_help")],
         ]
+    )
+
+
+def main_menu_button_keyboard() -> InlineKeyboardMarkup:
+    """Маленькая клавиатура из одной кнопки — вернуться в главное меню.
+    Используется везде, где бот отвечает вне контекста разделов (обычный чат, команды)."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_back")]]
     )
 
 
@@ -476,7 +516,8 @@ def prompt_target_keyboard(topic: str) -> InlineKeyboardMarkup:
         ]
         rows.append(row)
 
-    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")])
+    rows.append([InlineKeyboardButton(text="◀️ К темам", callback_data="menu_prompts")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_back")])
 
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -844,6 +885,66 @@ async def callback_menu_help(callback: CallbackQuery):
     await show_menu_screen(callback, MENU_HELP_TEXT, back_keyboard())
 
 
+@dp.callback_query(F.data == "fav_save")
+async def callback_fav_save(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    prompt_text = user_last_prompt.get(user_id)
+
+    if not prompt_text:
+        await callback.answer("Нечего сохранять — сначала сгенерируй промпт.", show_alert=True)
+        return
+
+    favorites = user_favorites.setdefault(user_id, [])
+    if prompt_text in favorites:
+        await callback.answer("Этот промпт уже в избранном ⭐", show_alert=True)
+        return
+
+    favorites.append(prompt_text)
+    # Ограничиваем на всякий случай, чтобы список не разрастался бесконечно
+    user_favorites[user_id] = favorites[-30:]
+    save_favorites()
+    await callback.answer("Сохранено в избранное ⭐")
+
+
+def favorites_list_keyboard(has_items: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if has_items:
+        rows.append([InlineKeyboardButton(text="🗑 Очистить всё", callback_data="fav_clear")])
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data == "menu_favorites")
+async def callback_menu_favorites(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    favorites = user_favorites.get(user_id, [])
+
+    if not favorites:
+        text = "⭐ <b>Избранное</b>\n\nПока пусто. Сохраняй промпты кнопкой ⭐ под готовым результатом."
+        await show_menu_screen(callback, text, favorites_list_keyboard(has_items=False))
+        return
+
+    # Показываем список коротким превью — полный текст лучше смотреть в самих сохранённых сообщениях
+    lines = ["⭐ <b>Избранное</b>\n"]
+    for i, item in enumerate(favorites, start=1):
+        preview = item.replace("\n", " ").strip()
+        if len(preview) > 80:
+            preview = preview[:80] + "…"
+        lines.append(f"{i}. {preview}")
+    text = "\n".join(lines)
+
+    await show_menu_screen(callback, text, favorites_list_keyboard(has_items=True))
+
+
+@dp.callback_query(F.data == "fav_clear")
+async def callback_fav_clear(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_favorites[user_id] = []
+    save_favorites()
+    text = "⭐ <b>Избранное</b>\n\nПока пусто. Сохраняй промпты кнопкой ⭐ под готовым результатом."
+    await show_menu_screen(callback, text, favorites_list_keyboard(has_items=False))
+
+
 @dp.callback_query(F.data == "menu_prompts")
 async def callback_menu_prompts(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
@@ -1000,12 +1101,12 @@ async def cmd_start(message: Message):
 async def cmd_reset(message: Message):
     user_histories[message.from_user.id] = []
     save_histories()
-    await message.answer("История диалога очищена.")
+    await message.answer("История диалога очищена.", reply_markup=main_menu_button_keyboard())
 
 
 @dp.message(F.text == "/help")
 async def cmd_help(message: Message):
-    await message.answer(MENU_HELP_TEXT, parse_mode="HTML")
+    await message.answer(MENU_HELP_TEXT, parse_mode="HTML", reply_markup=main_menu_button_keyboard())
 
 
 async def get_ai_reply(user_id: int, user_text: str) -> str:
@@ -1070,7 +1171,8 @@ async def cmd_translate(message: Message):
     if is_rate_limited(message.from_user.id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
-            f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+            f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+            reply_markup=main_menu_button_keyboard(),
         )
         return
 
@@ -1082,7 +1184,8 @@ async def cmd_translate(message: Message):
             "Использование:\n"
             "/translate <текст> — авто-перевод (RU→EN, другое→RU)\n"
             "/translate <код языка> <текст> — перевод на конкретный язык\n\n"
-            "Например: /translate en Привет, как дела?"
+            "Например: /translate en Привет, как дела?",
+            reply_markup=main_menu_button_keyboard(),
         )
         return
 
@@ -1097,7 +1200,7 @@ async def cmd_translate(message: Message):
 
     await bot.send_chat_action(message.chat.id, "typing")
     translation = await with_typing(message.chat.id, translate_text(text_to_translate, target_lang))
-    await message.answer(f"🌐 {translation}")
+    await message.answer(f"🌐 {translation}", reply_markup=main_menu_button_keyboard())
 
 
 # ==================== РАССЫЛКА (ТОЛЬКО ДЛЯ АДМИНА) ====================
@@ -1199,7 +1302,7 @@ async def handle_message(message: Message):
             cover_state["step"] = "format"
             await message.answer(COVER_FORMAT_TEXT, reply_markup=cover_format_keyboard())
         else:
-            await message.answer("Выбери один из вариантов кнопками выше 👆")
+            await message.answer("Выбери один из вариантов кнопками выше 👆", reply_markup=main_menu_button_keyboard())
         return
 
     # Если у пользователя включён режим перевода — обрабатываем текст иначе
@@ -1208,7 +1311,8 @@ async def handle_message(message: Message):
         if is_rate_limited(user_id):
             await message.answer(
                 f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
-                f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+                f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+                reply_markup=main_menu_button_keyboard(),
             )
             return
 
@@ -1242,7 +1346,8 @@ async def handle_message(message: Message):
         if is_rate_limited(user_id):
             await message.answer(
                 f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
-                f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+                f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+                reply_markup=main_menu_button_keyboard(),
             )
             return
 
@@ -1253,13 +1358,14 @@ async def handle_message(message: Message):
     if is_rate_limited(user_id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
-            f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+            f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+            reply_markup=main_menu_button_keyboard(),
         )
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
     reply = await get_ai_reply(user_id, message.text)
-    await message.answer(reply)
+    await message.answer(reply, reply_markup=main_menu_button_keyboard())
 
     if user_tts_enabled.get(user_id, False):
         await send_voice_reply(message.chat.id, reply)
@@ -1273,7 +1379,8 @@ async def handle_voice(message: Message):
     if is_rate_limited(user_id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
-            f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+            f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+            reply_markup=main_menu_button_keyboard(),
         )
         return
 
@@ -1313,13 +1420,13 @@ async def handle_voice(message: Message):
         recognized_text = transcription.text
     except Exception as e:
         logging.exception("Ошибка распознавания голоса")
-        await message.answer(f"Не удалось распознать голосовое сообщение: {e}")
+        await message.answer(f"Не удалось распознать голосовое сообщение: {e}", reply_markup=main_menu_button_keyboard())
         return
     finally:
         os.remove(tmp_path)
 
     if not recognized_text.strip():
-        await message.answer("Не удалось разобрать речь, попробуй ещё раз.")
+        await message.answer("Не удалось разобрать речь, попробуй ещё раз.", reply_markup=main_menu_button_keyboard())
         return
 
     # Режим перевода голосовых — переводим распознанный текст и остаёмся в режиме
@@ -1334,7 +1441,7 @@ async def handle_voice(message: Message):
         return
 
     reply = await get_ai_reply(user_id, recognized_text)
-    await message.answer(f"🎤 Я услышал: «{recognized_text}»\n\n{reply}")
+    await message.answer(f"🎤 Я услышал: «{recognized_text}»\n\n{reply}", reply_markup=main_menu_button_keyboard())
 
     if user_tts_enabled.get(user_id, False):
         await send_voice_reply(message.chat.id, reply)
@@ -1347,7 +1454,8 @@ async def handle_photo(message: Message):
     if is_rate_limited(message.from_user.id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
-            f"запросов в {RATE_LIMIT_WINDOW} секунд)."
+            f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+            reply_markup=main_menu_button_keyboard(),
         )
         return
 
@@ -1426,7 +1534,7 @@ async def handle_photo(message: Message):
     history.append({"role": "assistant", "content": reply})
     save_histories()
 
-    await message.answer(reply)
+    await message.answer(reply, reply_markup=main_menu_button_keyboard())
 
 
 async def main():
