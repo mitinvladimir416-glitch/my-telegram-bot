@@ -230,6 +230,9 @@ user_prompt_mode: dict[int, str] = {}  # user_id -> "suno" / "image" / "video"
 user_prompt_histories: dict[int, list] = {}
 user_prompt_target: dict[int, str] = {}  # user_id -> выбранная версия/нейросеть (текст для показа)
 
+# Храним состояние мастера "Обложка трека": шаг, текст песни, фото (если есть)
+user_cover_state: dict[int, dict] = {}
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -390,7 +393,10 @@ def prompts_submenu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text=cfg["label"], callback_data=f"prompt_{key}")]
             for key, cfg in PROMPT_CONFIG.items()
         ]
-        + [[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")]]
+        + [
+            [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
     )
 
 
@@ -501,11 +507,144 @@ async def get_prompt_reply(user_id: int, prompt_type: str, user_text: str) -> st
     return reply
 
 
+# ==================== РАЗДЕЛ "ОБЛОЖКА ТРЕКА" ====================
+
+COVER_INTRO_TEXT = (
+    "🖼 <b>Обложка трека</b>\n\n"
+    "Пришли текст песни (лирику) — на основе него подберу образы, настроение и стиль для обложки."
+)
+
+COVER_PHOTO_CHOICE_TEXT = (
+    "✅ Текст песни принят.\n\n"
+    "Хочешь добавить фото? Например, референс по стилю, фото исполнителя или просто вдохновляющую картинку — "
+    "учту её при составлении промпта."
+)
+
+COVER_AWAITING_PHOTO_TEXT = "📸 Пришли фото — или нажми кнопку ниже, чтобы продолжить без него."
+
+COVER_FORMAT_TEXT = "📐 Теперь выбери формат обложки:"
+
+# Форматы: код -> (aspect ratio для промпта, подпись для кнопки)
+COVER_FORMATS = {
+    "11": ("1:1", "⬛ Квадрат 1:1"),
+    "43": ("4:3", "🖼 Классический 4:3"),
+    "169": ("16:9", "📺 Широкий 16:9"),
+    "34": ("3:4", "📱 Портретный 3:4"),
+    "916": ("9:16", "📲 Вертикальный 9:16"),
+}
+
+COVER_SYSTEM_PROMPT = (
+    "Ты — эксперт по составлению промптов для генерации обложек музыкальных треков в модели "
+    "ChatGPT Image 2 (нейросеть OpenAI для генерации изображений). Тебе присылают текст песни "
+    "(лирику), возможно — референсное фото, и нужное соотношение сторон обложки. Твоя задача:\n"
+    "1. Проанализируй текст песни — определи настроение, тематику, ключевые образы и символы.\n"
+    "2. Если есть референсное фото — учти его стиль, цветовую палитру, композицию.\n"
+    "3. Составь единый выразительный промпт для обложки: визуальная композиция, художественный стиль "
+    "(фотореализм/иллюстрация/абстракция и т.д.), цветовая палитра, настроение, ключевые визуальные "
+    "элементы. Обложка не должна содержать текст/буквы, если явно не указано иное.\n"
+    "Сначала коротко (1-2 предложения на русском) опиши, какое настроение считал из лирики. "
+    "Затем сразу выдай готовый промпт под пометкой 'ГОТОВЫЙ ПРОМПТ:' на отдельной строке — "
+    "сам промпт пиши на английском (так эффективнее для генерации), обязательно укажи в конце "
+    "нужный aspect ratio."
+)
+
+
+def cover_back_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")]]
+    )
+
+
+def cover_photo_choice_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📸 Да, пришлю фото", callback_data="cover_photo_yes")],
+            [InlineKeyboardButton(text="⏭ Без фото", callback_data="cover_photo_no")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")],
+        ]
+    )
+
+
+def cover_awaiting_photo_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="⏭ Продолжить без фото", callback_data="cover_photo_no")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")],
+        ]
+    )
+
+
+def cover_format_keyboard() -> InlineKeyboardMarkup:
+    codes = list(COVER_FORMATS.keys())
+    rows = []
+    for i in range(0, len(codes), 2):
+        row = [
+            InlineKeyboardButton(text=COVER_FORMATS[c][1], callback_data=f"cover_fmt_{c}")
+            for c in codes[i : i + 2]
+        ]
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_prompts")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def cover_result_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Новая обложка", callback_data="menu_cover")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+async def generate_cover_prompt(lyrics: str, photo_base64: str | None, ratio: str) -> str:
+    """Анализирует текст песни (и фото, если есть) и составляет промпт для обложки трека."""
+    user_content_text = f"Текст песни:\n{lyrics}\n\nНужное соотношение сторон: {ratio}"
+
+    if photo_base64:
+        messages = [
+            {"role": "system", "content": COVER_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": user_content_text},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{photo_base64}"},
+                    },
+                ],
+            },
+        ]
+        model = VISION_MODEL
+        extra_kwargs = {"reasoning_format": "hidden"}
+    else:
+        messages = [
+            {"role": "system", "content": COVER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content_text},
+        ]
+        model = MODEL
+        extra_kwargs = {}
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1500,
+            **extra_kwargs,
+        )
+        return clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при составлении промпта обложки")
+        return describe_groq_error(e)
+
+
+
 @dp.message(F.text == "/menu")
 async def cmd_menu(message: Message):
     user_translate_mode.pop(message.from_user.id, None)
     user_prompt_mode.pop(message.from_user.id, None)
     user_prompt_target.pop(message.from_user.id, None)
+    user_cover_state.pop(message.from_user.id, None)
     await message.answer(MENU_MAIN_TEXT, reply_markup=main_menu_keyboard(), parse_mode="HTML")
 
 
@@ -533,6 +672,7 @@ async def callback_menu_chat(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
+    user_cover_state.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_CHAT_TEXT, back_keyboard())
 
 
@@ -542,6 +682,7 @@ async def callback_menu_translate(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
+    user_cover_state.pop(callback.from_user.id, None)
     await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard())
 
 
@@ -588,7 +729,70 @@ async def callback_menu_help(callback: CallbackQuery):
 async def callback_menu_prompts(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
+    user_cover_state.pop(callback.from_user.id, None)
     await show_menu_screen(callback, PROMPTS_SUBMENU_TEXT, prompts_submenu_keyboard())
+
+
+@dp.callback_query(F.data == "menu_cover")
+async def callback_menu_cover(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_prompt_mode.pop(user_id, None)
+    user_prompt_target.pop(user_id, None)
+    user_cover_state[user_id] = {"step": "lyrics"}
+    await show_menu_screen(callback, COVER_INTRO_TEXT, cover_back_keyboard())
+
+
+@dp.callback_query(F.data == "cover_photo_yes")
+async def callback_cover_photo_yes(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_cover_state.get(user_id)
+    if not state:
+        await callback.answer("Сессия сброшена, начни заново через меню.", show_alert=True)
+        return
+    state["step"] = "awaiting_photo"
+    await show_menu_screen(callback, COVER_AWAITING_PHOTO_TEXT, cover_awaiting_photo_keyboard())
+
+
+@dp.callback_query(F.data == "cover_photo_no")
+async def callback_cover_photo_no(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_cover_state.get(user_id)
+    if not state:
+        await callback.answer("Сессия сброшена, начни заново через меню.", show_alert=True)
+        return
+    state["step"] = "format"
+    state.pop("photo_base64", None)
+    await show_menu_screen(callback, COVER_FORMAT_TEXT, cover_format_keyboard())
+
+
+@dp.callback_query(F.data.startswith("cover_fmt_"))
+async def callback_cover_format(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    state = user_cover_state.get(user_id)
+    if not state or "lyrics" not in state:
+        await callback.answer("Сессия сброшена, начни заново через меню.", show_alert=True)
+        return
+
+    code = callback.data[len("cover_fmt_"):]
+    ratio, _label = COVER_FORMATS.get(code, ("1:1", ""))
+
+    if is_rate_limited(user_id):
+        await callback.answer(
+            f"Слишком много запросов подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
+            f"запросов в {RATE_LIMIT_WINDOW} секунд).",
+            show_alert=True,
+        )
+        return
+
+    await callback.answer()
+
+    chat_id = callback.message.chat.id
+    lyrics = state["lyrics"]
+    photo_base64 = state.get("photo_base64")
+
+    reply = await with_typing(chat_id, generate_cover_prompt(lyrics, photo_base64, ratio))
+    user_cover_state.pop(user_id, None)
+    await send_prompt_reply(chat_id, reply, cover_result_keyboard())
 
 
 @dp.callback_query(F.data.in_([f"prompt_{k}" for k in PROMPT_CONFIG.keys()]))
@@ -623,6 +827,7 @@ async def callback_menu_back(callback: CallbackQuery):
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
+    user_cover_state.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_MAIN_TEXT, main_menu_keyboard())
 
 
@@ -635,6 +840,7 @@ async def cmd_start(message: Message):
     user_translate_mode.pop(message.from_user.id, None)
     user_prompt_mode.pop(message.from_user.id, None)
     user_prompt_target.pop(message.from_user.id, None)
+    user_cover_state.pop(message.from_user.id, None)
 
     if os.path.exists(WELCOME_IMAGE):
         photo = FSInputFile(WELCOME_IMAGE)
@@ -832,6 +1038,23 @@ async def handle_message(message: Message):
     register_user(message.from_user.id)
     user_id = message.from_user.id
 
+    # Если у пользователя открыт мастер "Обложка трека" — обрабатываем текст по шагам
+    cover_state = user_cover_state.get(user_id)
+    if cover_state is not None:
+        step = cover_state.get("step")
+        if step == "lyrics":
+            cover_state["lyrics"] = message.text
+            cover_state["step"] = "photo_choice"
+            await message.answer(COVER_PHOTO_CHOICE_TEXT, reply_markup=cover_photo_choice_keyboard())
+        elif step == "awaiting_photo":
+            await message.answer(
+                "Пришли именно фото 📸 — или нажми кнопку, чтобы продолжить без него.",
+                reply_markup=cover_awaiting_photo_keyboard(),
+            )
+        else:
+            await message.answer("Выбери один из вариантов кнопками выше 👆")
+        return
+
     # Если у пользователя включён режим перевода — обрабатываем текст иначе
     mode = user_translate_mode.get(user_id)
     if mode is not None:
@@ -952,6 +1175,14 @@ async def handle_photo(message: Message):
             image_base64 = base64.b64encode(image_file.read()).decode("utf-8")
     finally:
         os.remove(tmp_path)
+
+    # Если пользователь на шаге "жду фото" в мастере "Обложка трека"
+    cover_state = user_cover_state.get(message.from_user.id)
+    if cover_state is not None and cover_state.get("step") == "awaiting_photo":
+        cover_state["photo_base64"] = image_base64
+        cover_state["step"] = "format"
+        await message.answer(COVER_FORMAT_TEXT, reply_markup=cover_format_keyboard())
+        return
 
     # Если у пользователя включён режим составления промпта для картинки —
     # обрабатываем фото как запрос на правку через генеративную нейросеть
