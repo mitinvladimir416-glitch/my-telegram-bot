@@ -24,6 +24,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")  # твой Telegram ID — только ты сможешь делать рассылку
+PROMPT_STICKER_ID = os.getenv("PROMPT_STICKER_ID")  # file_id стикера, который показывается перед готовым промптом
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError(
@@ -69,6 +70,23 @@ async def with_typing(chat_id: int, coro):
         return await coro
     finally:
         typing_task.cancel()
+
+
+async def send_prompt_reply(chat_id: int, reply_text: str, keyboard: InlineKeyboardMarkup):
+    """Отправляет ответ из раздела 'Промпты'. Если это финальный готовый промпт —
+    сначала на 3-4 секунды показывает стикер (для эффектности), потом удаляет его."""
+    if "ГОТОВЫЙ ПРОМПТ:" in reply_text and PROMPT_STICKER_ID:
+        try:
+            sticker_message = await bot.send_sticker(chat_id, PROMPT_STICKER_ID)
+            await asyncio.sleep(3.5)
+            try:
+                await bot.delete_message(chat_id, sticker_message.message_id)
+            except Exception:
+                logging.exception("Не удалось удалить стикер после показа")
+        except Exception:
+            logging.exception("Не удалось отправить стикер перед промптом")
+
+    await bot.send_message(chat_id, reply_text, reply_markup=keyboard)
 
 SYSTEM_PROMPT = "Ты дружелюбный ассистент, отвечай кратко и по делу на русском языке."
 
@@ -739,6 +757,17 @@ def is_admin(user_id: int) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
 
+@dp.message(F.sticker)
+async def handle_sticker(message: Message):
+    """Если админ присылает стикер боту — подсказываем его file_id для настройки PROMPT_STICKER_ID."""
+    if is_admin(message.from_user.id):
+        await message.answer(
+            f"file_id этого стикера:\n<code>{message.sticker.file_id}</code>\n\n"
+            "Вставь его в переменную окружения PROMPT_STICKER_ID на Railway.",
+            parse_mode="HTML",
+        )
+
+
 @dp.message(F.photo & F.caption.startswith("/broadcast"))
 async def cmd_broadcast_photo(message: Message):
     """Рассылка картинки с подписью всем пользователям. Формат: /broadcast текст (как подпись к фото)."""
@@ -839,7 +868,7 @@ async def handle_message(message: Message):
             return
 
         reply = await with_typing(message.chat.id, get_prompt_reply(user_id, prompt_type, message.text))
-        await message.answer(reply, reply_markup=prompt_active_keyboard())
+        await send_prompt_reply(message.chat.id, reply, prompt_active_keyboard())
         return
 
     if is_rate_limited(user_id):
@@ -938,7 +967,7 @@ async def handle_photo(message: Message):
             message.chat.id,
             get_image_prompt_from_photo(message.from_user.id, image_base64, message.caption),
         )
-        await message.answer(reply, reply_markup=prompt_active_keyboard())
+        await send_prompt_reply(message.chat.id, reply, prompt_active_keyboard())
         return
 
     # Если есть подпись к фото — используем её как вопрос, иначе просим просто описать
