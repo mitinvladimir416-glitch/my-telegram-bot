@@ -7,6 +7,7 @@ import re
 import tempfile
 import time
 from datetime import date, timedelta
+import httpx
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -27,6 +28,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 ADMIN_ID = os.getenv("ADMIN_ID")  # твой Telegram ID — только ты сможешь делать рассылку
 PROMPT_STICKER_ID = os.getenv("PROMPT_STICKER_ID")  # file_id стикера, который показывается перед готовым промптом
+
+# Адрес botyara-api и секрет для связи с ним — чтобы сообщения и избранное из бота
+# попадали в общую базу данных и были видны на сайте
+BOTYARA_API_URL = os.getenv("BOTYARA_API_URL")
+BOT_INTERNAL_SECRET = os.getenv("BOT_INTERNAL_SECRET")
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError(
@@ -201,6 +207,55 @@ def save_stats():
             json.dump(stats, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logging.exception(f"НЕ УДАЛОСЬ сохранить статистику: {e}")
+
+
+async def sync_message_to_site(
+    user_id: int, username: str | None, first_name: str | None, role: str, content: str
+):
+    """
+    Отправляет одно сообщение в botyara-api, чтобы оно попало в общую историю и было
+    видно на сайте. Если сайт временно недоступен — просто пишем в лог и не мешаем боту
+    работать дальше (история всё равно останется в локальном history.json).
+    """
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{BOTYARA_API_URL}/api/bot/message",
+                json={
+                    "telegram_id": user_id,
+                    "telegram_username": username,
+                    "telegram_first_name": first_name,
+                    "role": role,
+                    "content": content,
+                },
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+    except Exception:
+        logging.exception("Не удалось отправить сообщение на сайт (не критично, бот продолжает работать)")
+
+
+async def sync_favorite_to_site(
+    user_id: int, username: str | None, first_name: str | None, content: str
+):
+    """Отправляет сохранённый промпт в общее избранное на сайте."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{BOTYARA_API_URL}/api/bot/favorite",
+                json={
+                    "telegram_id": user_id,
+                    "telegram_username": username,
+                    "telegram_first_name": first_name,
+                    "content": content,
+                },
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+    except Exception:
+        logging.exception("Не удалось отправить избранное на сайт (не критично, бот продолжает работать)")
 
 
 def record_message_stat():
@@ -941,6 +996,11 @@ async def callback_fav_save(callback: CallbackQuery):
     # Ограничиваем на всякий случай, чтобы список не разрастался бесконечно
     user_favorites[user_id] = favorites[-30:]
     save_favorites()
+
+    await sync_favorite_to_site(
+        user_id, callback.from_user.username, callback.from_user.first_name, prompt_text
+    )
+
     await callback.answer("Сохранено в избранное ⭐")
 
 
@@ -1151,7 +1211,9 @@ async def cmd_help(message: Message):
     await message.answer(MENU_HELP_TEXT, parse_mode="HTML", reply_markup=main_menu_button_keyboard())
 
 
-async def get_ai_reply(user_id: int, user_text: str) -> str:
+async def get_ai_reply(
+    user_id: int, user_text: str, username: str | None = None, first_name: str | None = None
+) -> str:
     """Отправляет текст в Groq и возвращает ответ, обновляя историю диалога."""
     history = user_histories.setdefault(user_id, [])
     history.append({"role": "user", "content": user_text})
@@ -1172,6 +1234,10 @@ async def get_ai_reply(user_id: int, user_text: str) -> str:
 
     history.append({"role": "assistant", "content": reply})
     save_histories()
+
+    await sync_message_to_site(user_id, username, first_name, "user", user_text)
+    await sync_message_to_site(user_id, username, first_name, "assistant", reply)
+
     return reply
 
 
@@ -1456,7 +1522,9 @@ async def handle_message(message: Message):
         return
 
     await bot.send_chat_action(message.chat.id, "typing")
-    reply = await get_ai_reply(user_id, message.text)
+    reply = await get_ai_reply(
+        user_id, message.text, message.from_user.username, message.from_user.first_name
+    )
     await message.answer(reply, reply_markup=main_menu_button_keyboard())
 
     if user_tts_enabled.get(user_id, False):
@@ -1533,7 +1601,9 @@ async def handle_voice(message: Message):
         await send_voice_reply(message.chat.id, translation)
         return
 
-    reply = await get_ai_reply(user_id, recognized_text)
+    reply = await get_ai_reply(
+        user_id, recognized_text, message.from_user.username, message.from_user.first_name
+    )
     await message.answer(f"🎤 Я услышал: «{recognized_text}»\n\n{reply}", reply_markup=main_menu_button_keyboard())
 
     if user_tts_enabled.get(user_id, False):
@@ -1627,6 +1697,14 @@ async def handle_photo(message: Message):
     history.append({"role": "user", "content": f"[Отправил фото] {question}"})
     history.append({"role": "assistant", "content": reply})
     save_histories()
+
+    await sync_message_to_site(
+        user_id, message.from_user.username, message.from_user.first_name,
+        "user", f"[Отправил фото] {question}",
+    )
+    await sync_message_to_site(
+        user_id, message.from_user.username, message.from_user.first_name, "assistant", reply
+    )
 
     await message.answer(reply, reply_markup=main_menu_button_keyboard())
 
