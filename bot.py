@@ -16,6 +16,7 @@ from aiogram.types import (
 )
 from aiogram.filters import CommandStart
 from groq import Groq, APIConnectionError, APIStatusError, RateLimitError
+from gtts import gTTS
 from dotenv import load_dotenv
 
 # Загружаем ключи из файла .env (он должен лежать в той же папке)
@@ -52,20 +53,20 @@ dp = Dispatcher()
 groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
 
 
-async def _typing_loop(chat_id: int):
-    """Периодически шлёт 'печатает...', пока идёт долгий запрос к нейросети —
-    иначе Telegram гасит индикатор через ~5 секунд."""
+async def _typing_loop(chat_id: int, action: str = "typing"):
+    """Периодически шлёт индикатор действия (печатает.../записывает голосовое...), пока идёт
+    долгий запрос к нейросети — иначе Telegram гасит индикатор через ~5 секунд."""
     try:
         while True:
-            await bot.send_chat_action(chat_id, "typing")
+            await bot.send_chat_action(chat_id, action)
             await asyncio.sleep(4)
     except asyncio.CancelledError:
         pass
 
 
-async def with_typing(chat_id: int, coro):
-    """Оборачивает долгий вызов нейросети, поддерживая индикатор 'печатает...' всё время."""
-    typing_task = asyncio.create_task(_typing_loop(chat_id))
+async def with_typing(chat_id: int, coro, action: str = "typing"):
+    """Оборачивает долгий вызов нейросети, поддерживая индикатор действия всё время."""
+    typing_task = asyncio.create_task(_typing_loop(chat_id, action))
     try:
         return await coro
     finally:
@@ -233,6 +234,44 @@ user_prompt_target: dict[int, str] = {}  # user_id -> выбранная вер�
 # Храним состояние мастера "Обложка трека": шаг, текст песни, фото (если есть)
 user_cover_state: dict[int, dict] = {}
 
+# Храним, у кого включена озвучка ответов в обычном общении (по умолчанию выключена)
+user_tts_enabled: dict[int, bool] = {}
+
+
+def synthesize_speech_sync(text: str) -> str:
+    """Синхронно генерирует mp3-файл с озвучкой текста (для запуска в отдельном потоке)."""
+    # gTTS не любит слишком длинный текст и падает на некоторых спецсимволах — подчищаем
+    clean_text = re.sub(r"[*_`#]", "", text).strip()
+    if len(clean_text) > 3000:
+        clean_text = clean_text[:3000]
+
+    tts = gTTS(text=clean_text, lang="ru")
+    tmp = tempfile.NamedTemporaryFile(suffix=".mp3", delete=False)
+    tts.save(tmp.name)
+    return tmp.name
+
+
+async def send_voice_reply(chat_id: int, text: str):
+    """Озвучивает текст и отправляет как голосовое/аудио сообщение."""
+    try:
+        mp3_path = await with_typing(
+            chat_id, asyncio.to_thread(synthesize_speech_sync, text), action="record_voice"
+        )
+    except Exception:
+        logging.exception("Не удалось сгенерировать озвучку ответа")
+        return
+
+    try:
+        audio_file = FSInputFile(mp3_path)
+        await bot.send_audio(chat_id, audio_file, title="Ответ Ботяры 🎙")
+    except Exception:
+        logging.exception("Не удалось отправить озвученный ответ")
+    finally:
+        try:
+            os.remove(mp3_path)
+        except OSError:
+            pass
+
 
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -252,11 +291,26 @@ def back_keyboard() -> InlineKeyboardMarkup:
     )
 
 
+def chat_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    voice_on = user_tts_enabled.get(user_id, False)
+    text_label = "✅ 💬 Текстом" if not voice_on else "⚪ 💬 Текстом"
+    voice_label = "✅ 🎙 Голосом" if voice_on else "⚪ 🎙 Голосом"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text=text_label, callback_data="chat_mode_text"),
+                InlineKeyboardButton(text=voice_label, callback_data="chat_mode_voice"),
+            ],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
 MENU_MAIN_TEXT = "📋 <b>Главное меню</b>\n\nВыбери, что хочешь сделать:"
 MENU_CHAT_TEXT = (
     "💬 <b>Режим общения</b>\n\n"
-    "Просто пиши мне сообщения текстом, голосом или фото — я отвечу с помощью нейросети.\n"
-    "Всё уже работает, ничего дополнительно нажимать не нужно 🙂"
+    "Пиши мне текстом, голосом или фото — отвечу с помощью нейросети.\n\n"
+    "Выбери, как отвечать: текстом или голосовыми сообщениями 👇"
 )
 MENU_HELP_TEXT = (
     "ℹ️ <b>Помощь</b>\n\n"
@@ -274,12 +328,25 @@ QUICK_LANGUAGES = {
     "de": "немецкий",
 }
 
-TRANSLATE_SUBMENU_TEXT = "🌐 <b>Переводчик</b>\n\nВыбери язык — и просто присылай текст, буду переводить:"
+# Храним выбранный тип перевода: "text" (по умолчанию) или "voice"
+user_translate_input_type: dict[int, str] = {}
+
+TRANSLATE_SUBMENU_TEXT = (
+    "🌐 <b>Переводчик</b>\n\n"
+    "Сначала выбери, что переводим — текст или голосовые сообщения, а затем язык:"
+)
 
 
-def translate_submenu_keyboard() -> InlineKeyboardMarkup:
+def translate_submenu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    input_type = user_translate_input_type.get(user_id, "text")
+    text_label = "✅ ⌨️ Текста" if input_type == "text" else "⚪ ⌨️ Текста"
+    voice_label = "✅ 🎙 Голосовых" if input_type == "voice" else "⚪ 🎙 Голосовых"
     return InlineKeyboardMarkup(
         inline_keyboard=[
+            [
+                InlineKeyboardButton(text=text_label, callback_data="tr_input_text"),
+                InlineKeyboardButton(text=voice_label, callback_data="tr_input_voice"),
+            ],
             [
                 InlineKeyboardButton(text="🇬🇧 Английский", callback_data="tr_lang_en"),
                 InlineKeyboardButton(text="🇫🇷 Французский", callback_data="tr_lang_fr"),
@@ -711,7 +778,14 @@ async def callback_menu_chat(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
     user_cover_state.pop(callback.from_user.id, None)
-    await show_menu_screen(callback, MENU_CHAT_TEXT, back_keyboard())
+    await show_menu_screen(callback, MENU_CHAT_TEXT, chat_settings_keyboard(callback.from_user.id))
+
+
+@dp.callback_query(F.data.in_(["chat_mode_text", "chat_mode_voice"]))
+async def callback_chat_mode(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_tts_enabled[user_id] = callback.data == "chat_mode_voice"
+    await show_menu_screen(callback, MENU_CHAT_TEXT, chat_settings_keyboard(user_id))
 
 
 @dp.callback_query(F.data == "menu_translate")
@@ -721,7 +795,14 @@ async def callback_menu_translate(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
     user_cover_state.pop(callback.from_user.id, None)
-    await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard())
+    await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard(callback.from_user.id))
+
+
+@dp.callback_query(F.data.in_(["tr_input_text", "tr_input_voice"]))
+async def callback_translate_input_type(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    user_translate_input_type[user_id] = "voice" if callback.data == "tr_input_voice" else "text"
+    await show_menu_screen(callback, TRANSLATE_SUBMENU_TEXT, translate_submenu_keyboard(user_id))
 
 
 @dp.callback_query(F.data.in_(["tr_lang_en", "tr_lang_fr", "tr_lang_de"]))
@@ -1131,12 +1212,21 @@ async def handle_message(message: Message):
             )
             return
 
-        # Пользователь вводит название/код языка после нажатия "Указать язык"
+        # Пользователь вводит название/код языка после нажатия "Указать язык" — разрешено всегда
         if mode.get("awaiting_custom_lang"):
             custom_lang = message.text.strip()
             user_translate_mode[user_id] = {"target_lang": custom_lang}
             await message.answer(
                 f"✅ Режим перевода на «{custom_lang}» включён.\n\nПросто присылай текст — переведу.",
+                reply_markup=translate_active_keyboard(),
+            )
+            return
+
+        # Если выбран режим "перевод голосовых" — просим прислать войс вместо текста
+        if user_translate_input_type.get(user_id, "text") == "voice":
+            await message.answer(
+                "🎙 Сейчас включён режим перевода голосовых сообщений. Пришли войс — или переключись "
+                "на «⌨️ Текста» в меню переводчика.",
                 reply_markup=translate_active_keyboard(),
             )
             return
@@ -1171,17 +1261,38 @@ async def handle_message(message: Message):
     reply = await get_ai_reply(user_id, message.text)
     await message.answer(reply)
 
+    if user_tts_enabled.get(user_id, False):
+        await send_voice_reply(message.chat.id, reply)
+
 
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     register_user(message.from_user.id)
+    user_id = message.from_user.id
 
-    if is_rate_limited(message.from_user.id):
+    if is_rate_limited(user_id):
         await message.answer(
             f"Слишком много сообщений подряд. Подожди немного (лимит: {RATE_LIMIT_COUNT} "
             f"запросов в {RATE_LIMIT_WINDOW} секунд)."
         )
         return
+
+    # Если у пользователя открыт переводчик, но выбран режим "текста" — голос не подходит
+    translate_mode = user_translate_mode.get(user_id)
+    if translate_mode is not None:
+        if translate_mode.get("awaiting_custom_lang"):
+            await message.answer(
+                "⌨️ Напиши язык текстом — например: испанский, es, japanese.",
+                reply_markup=translate_active_keyboard(),
+            )
+            return
+        if user_translate_input_type.get(user_id, "text") == "text":
+            await message.answer(
+                "⌨️ Сейчас включён режим перевода текста. Напиши текст — или переключись "
+                "на «🎙 Голосовых» в меню переводчика.",
+                reply_markup=translate_active_keyboard(),
+            )
+            return
 
     await bot.send_chat_action(message.chat.id, "typing")
 
@@ -1211,8 +1322,22 @@ async def handle_voice(message: Message):
         await message.answer("Не удалось разобрать речь, попробуй ещё раз.")
         return
 
-    reply = await get_ai_reply(message.from_user.id, recognized_text)
+    # Режим перевода голосовых — переводим распознанный текст и остаёмся в режиме
+    if translate_mode is not None:
+        translation = await with_typing(
+            message.chat.id, translate_text(recognized_text, translate_mode.get("target_lang"))
+        )
+        await message.answer(
+            f"🎤 Я услышал: «{recognized_text}»\n\n🌐 {translation}", reply_markup=translate_active_keyboard()
+        )
+        await send_voice_reply(message.chat.id, translation)
+        return
+
+    reply = await get_ai_reply(user_id, recognized_text)
     await message.answer(f"🎤 Я услышал: «{recognized_text}»\n\n{reply}")
+
+    if user_tts_enabled.get(user_id, False):
+        await send_voice_reply(message.chat.id, reply)
 
 
 @dp.message(F.photo)
