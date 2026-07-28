@@ -6,6 +6,7 @@ import os
 import re
 import tempfile
 import time
+from datetime import date, timedelta
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -40,6 +41,7 @@ VISION_MODEL = "qwen/qwen3.6-27b"
 HISTORY_FILE = "history.json"
 USERS_FILE = "users.json"
 FAVORITES_FILE = "favorites.json"
+STATS_FILE = "stats.json"
 
 # Лимит: не больше RATE_LIMIT_COUNT запросов за RATE_LIMIT_WINDOW секунд на пользователя
 RATE_LIMIT_COUNT = 5
@@ -182,10 +184,44 @@ def save_favorites():
         logging.exception(f"НЕ УДАЛОСЬ сохранить избранное: {e}")
 
 
+def load_stats() -> dict:
+    """Загружает статистику использования бота из файла."""
+    default = {"messages_total": 0, "messages_by_date": {}, "sections": {}}
+    raw = load_json_file(STATS_FILE, default)
+    # На случай если в старом файле не хватает какого-то ключа
+    for key, value in default.items():
+        raw.setdefault(key, value)
+    return raw
+
+
+def save_stats():
+    """Сохраняет статистику использования бота в файл."""
+    try:
+        with open(STATS_FILE, "w", encoding="utf-8") as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.exception(f"НЕ УДАЛОСЬ сохранить статистику: {e}")
+
+
+def record_message_stat():
+    """Учитывает одно входящее сообщение (любого типа) в статистике."""
+    stats["messages_total"] += 1
+    today = date.today().isoformat()
+    stats["messages_by_date"][today] = stats["messages_by_date"].get(today, 0) + 1
+    save_stats()
+
+
+def record_section_stat(section: str):
+    """Учитывает открытие раздела меню в статистике."""
+    stats["sections"][section] = stats["sections"].get(section, 0) + 1
+    save_stats()
+
+
 # Память диалога и список пользователей — подгружаются из файлов при старте
 user_histories = load_histories()
 registered_users = load_users()
 user_favorites = load_favorites()  # user_id -> список сохранённых промптов
+stats = load_stats()
 
 # Храним последний сгенерированный промпт каждого пользователя — чтобы кнопка
 # "Сохранить в избранное" знала, что именно сохранять (в файл не пишем, это временное)
@@ -815,6 +851,7 @@ async def show_menu_screen(callback: CallbackQuery, text: str, keyboard: InlineK
 
 @dp.callback_query(F.data == "menu_chat")
 async def callback_menu_chat(callback: CallbackQuery):
+    record_section_stat("chat")
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
@@ -831,6 +868,7 @@ async def callback_chat_mode(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_translate")
 async def callback_menu_translate(callback: CallbackQuery):
+    record_section_stat("translate")
     # Выходим из режима перевода/промптов при повторном открытии подменю
     user_translate_mode.pop(callback.from_user.id, None)
     user_prompt_mode.pop(callback.from_user.id, None)
@@ -916,6 +954,7 @@ def favorites_list_keyboard(has_items: bool) -> InlineKeyboardMarkup:
 
 @dp.callback_query(F.data == "menu_favorites")
 async def callback_menu_favorites(callback: CallbackQuery):
+    record_section_stat("favorites")
     user_id = callback.from_user.id
     favorites = user_favorites.get(user_id, [])
 
@@ -947,6 +986,7 @@ async def callback_fav_clear(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_prompts")
 async def callback_menu_prompts(callback: CallbackQuery):
+    record_section_stat("prompts")
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
     user_cover_state.pop(callback.from_user.id, None)
@@ -955,6 +995,7 @@ async def callback_menu_prompts(callback: CallbackQuery):
 
 @dp.callback_query(F.data == "menu_cover")
 async def callback_menu_cover(callback: CallbackQuery):
+    record_section_stat("cover")
     user_id = callback.from_user.id
     user_prompt_mode.pop(user_id, None)
     user_prompt_target.pop(user_id, None)
@@ -1043,6 +1084,7 @@ async def callback_cover_format(callback: CallbackQuery):
 async def callback_prompt_select(callback: CallbackQuery):
     """Пользователь выбрал тему (Suno/Картинка/Видео) — показываем выбор версии/нейросети."""
     topic = callback.data.split("_", 1)[1]
+    record_section_stat(f"prompt_{topic}")
     user_id = callback.from_user.id
     user_prompt_mode[user_id] = topic
     user_prompt_target.pop(user_id, None)
@@ -1209,6 +1251,55 @@ def is_admin(user_id: int) -> bool:
     return ADMIN_ID is not None and user_id == ADMIN_ID
 
 
+@dp.message(F.text == "/stats")
+async def cmd_stats(message: Message):
+    """Показывает статистику использования бота. Доступно только админу."""
+    if not is_admin(message.from_user.id):
+        return  # Не админ — молча игнорируем
+
+    total_users = len(registered_users)
+    messages_total = stats["messages_total"]
+
+    today = date.today()
+    messages_today = stats["messages_by_date"].get(today.isoformat(), 0)
+
+    messages_week = 0
+    for i in range(7):
+        day = (today - timedelta(days=i)).isoformat()
+        messages_week += stats["messages_by_date"].get(day, 0)
+
+    sections_sorted = sorted(stats["sections"].items(), key=lambda x: x[1], reverse=True)
+
+    section_labels = {
+        "chat": "💬 Общение",
+        "translate": "🌐 Переводчик",
+        "prompts": "🎨 Промпты (открытие раздела)",
+        "prompt_suno": "🎵 Промпты → Suno",
+        "prompt_image": "🖼 Промпты → Картинка",
+        "prompt_video": "🎬 Промпты → Видео",
+        "cover": "🖼 Обложка трека",
+        "favorites": "⭐ Избранное",
+    }
+
+    if sections_sorted:
+        sections_text = "\n".join(
+            f"  {section_labels.get(name, name)}: {count}" for name, count in sections_sorted
+        )
+    else:
+        sections_text = "  Пока данных нет"
+
+    text = (
+        "📊 <b>Статистика бота</b>\n\n"
+        f"👥 Пользователей всего: {total_users}\n\n"
+        f"💬 Сообщений всего: {messages_total}\n"
+        f"💬 Сообщений сегодня: {messages_today}\n"
+        f"💬 Сообщений за 7 дней: {messages_week}\n\n"
+        f"📋 Популярность разделов:\n{sections_text}"
+    )
+
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_button_keyboard())
+
+
 @dp.message(F.sticker)
 async def handle_sticker(message: Message):
     """Если админ присылает стикер боту — подсказываем его file_id для настройки PROMPT_STICKER_ID."""
@@ -1282,6 +1373,7 @@ async def cmd_broadcast_text(message: Message):
 @dp.message(F.text)
 async def handle_message(message: Message):
     register_user(message.from_user.id)
+    record_message_stat()
     user_id = message.from_user.id
 
     # Если у пользователя открыт мастер "Обложка трека" — обрабатываем текст по шагам
@@ -1374,6 +1466,7 @@ async def handle_message(message: Message):
 @dp.message(F.voice)
 async def handle_voice(message: Message):
     register_user(message.from_user.id)
+    record_message_stat()
     user_id = message.from_user.id
 
     if is_rate_limited(user_id):
@@ -1450,6 +1543,7 @@ async def handle_voice(message: Message):
 @dp.message(F.photo)
 async def handle_photo(message: Message):
     register_user(message.from_user.id)
+    record_message_stat()
 
     if is_rate_limited(message.from_user.id):
         await message.answer(
