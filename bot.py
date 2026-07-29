@@ -231,6 +231,14 @@ ROLE_CONFIG = {
 
 DEFAULT_ROLE = "default"
 
+CATEGORY_LABELS = {
+    "suno": "🎵 Suno",
+    "image": "🖼 Картинка",
+    "video": "🎬 Видео",
+    "cover": "🖼️ Обложка трека",
+    "other": "💬 Разное",
+}
+
 # ==================== ОПОВЕЩЕНИЯ ОБ ОБНОВЛЕНИЯХ (для админа) ====================
 
 ANNOUNCE_SYSTEM_PROMPT = (
@@ -495,7 +503,9 @@ async def fetch_gallery_post(post_id: int) -> dict | None:
         return None
 
 
-async def publish_to_gallery(user_id: int, username: str | None, first_name: str | None, content: str) -> dict | None:
+async def publish_to_gallery(
+    user_id: int, username: str | None, first_name: str | None, content: str, category: str = "other"
+) -> dict | None:
     """Публикует промпт в галерею (проходит модерацию на бэкенде). None — если сайт недоступен."""
     if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
         return None
@@ -508,6 +518,7 @@ async def publish_to_gallery(user_id: int, username: str | None, first_name: str
                     "telegram_username": username,
                     "telegram_first_name": first_name,
                     "content": content,
+                    "category": category,
                 },
                 headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
             )
@@ -709,6 +720,10 @@ user_tts_enabled: dict[int, bool] = {}
 # admin_id -> {"raw": исходный текст, "text": текст, оформленный нейросетью}
 user_pending_announcement: dict[int, dict] = {}
 
+# Категория (папка) для каждого сохранённого в избранное промпта: user_id -> {текст: категория}
+# Храним отдельно от user_favorites, чтобы не переделывать формат history/favorites.json
+user_favorite_categories: dict[int, dict[str, str]] = {}
+
 # Пользователь нажал "Написать комментарий" к посту галереи — ждём от него текстовое сообщение:
 # user_id -> id поста, к которому пишется комментарий
 user_gallery_comment_target: dict[int, int] = {}
@@ -831,6 +846,8 @@ def chat_menu_text(user_id: int) -> str:
         "💬 <b>Режим общения</b>\n\n"
         f"Сейчас общаешься с ролью: {role_cfg['emoji']} <b>{role_cfg['label']}</b>\n"
         "Пиши мне текстом, голосом или фото — отвечу с помощью нейросети.\n\n"
+        "💡 Кстати, то же самое общение (и вся история) доступно и на сайте 24promtbot.ru — "
+        "там ещё удобнее с телефона или компьютера.\n\n"
         "Настрой ниже 👇"
     )
 
@@ -1481,12 +1498,15 @@ async def callback_fav_save(callback: CallbackQuery):
     user_favorites[user_id] = favorites[-30:]
     save_favorites()
 
+    category = user_prompt_mode.get(user_id, "other")
+    user_favorite_categories.setdefault(user_id, {})[prompt_text] = category
+
     await sync_favorite_to_site(
         user_id,
         callback.from_user.username,
         callback.from_user.first_name,
         prompt_text,
-        category=user_prompt_mode.get(user_id, "other"),
+        category=category,
     )
 
     await callback.answer("Сохранено в избранное ⭐")
@@ -1517,11 +1537,13 @@ async def callback_menu_favorites(callback: CallbackQuery):
 
     # Показываем список коротким превью — полный текст лучше смотреть в самих сохранённых сообщениях
     lines = ["⭐ <b>Избранное</b>\n"]
+    cats = user_favorite_categories.get(user_id, {})
     for i, item in enumerate(favorites, start=1):
         preview = item.replace("\n", " ").strip()
         if len(preview) > 80:
             preview = preview[:80] + "…"
-        lines.append(f"{i}. {preview}")
+        cat_label = CATEGORY_LABELS.get(cats.get(item, "other"), CATEGORY_LABELS["other"])
+        lines.append(f"{i}. {cat_label} · {preview}")
     text = "\n".join(lines)
 
     await show_menu_screen(callback, text, favorites_list_keyboard(favorites))
@@ -1547,7 +1569,10 @@ async def callback_gallery_publish_from_favorites(callback: CallbackQuery):
         return
 
     await callback.answer("Публикую…")
-    result = await publish_to_gallery(user_id, callback.from_user.username, callback.from_user.first_name, favorites[idx])
+    category = user_favorite_categories.get(user_id, {}).get(favorites[idx], "other")
+    result = await publish_to_gallery(
+        user_id, callback.from_user.username, callback.from_user.first_name, favorites[idx], category=category
+    )
     if result is None:
         await callback.message.answer("Галерея временно недоступна — попробуй чуть позже.")
     elif result.get("status") == "approved":
@@ -1595,7 +1620,8 @@ async def callback_menu_gallery(callback: CallbackQuery):
         preview = p["content"].replace("\n", " ").strip()
         if len(preview) > 70:
             preview = preview[:70] + "…"
-        lines.append(f"#{p['id']} · {p['author']}: {preview}")
+        cat_label = CATEGORY_LABELS.get(p.get("category", "other"), CATEGORY_LABELS["other"])
+        lines.append(f"#{p['id']} · {cat_label} · {p['author']}: {preview}")
     text = "\n".join(lines)
 
     await show_menu_screen(callback, text, gallery_list_keyboard(posts))
