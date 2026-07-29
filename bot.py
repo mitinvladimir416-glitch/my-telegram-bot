@@ -18,6 +18,7 @@ from aiogram.types import (
 )
 from aiogram.filters import CommandStart
 from groq import Groq, APIConnectionError, APIStatusError, RateLimitError
+from openai import OpenAI
 from gtts import gTTS
 from dotenv import load_dotenv
 
@@ -26,6 +27,7 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")  # необязательный — DeepSeek через OpenRouter
 ADMIN_ID = os.getenv("ADMIN_ID")  # твой Telegram ID — только ты сможешь делать рассылку
 PROMPT_STICKER_ID = os.getenv("PROMPT_STICKER_ID")  # file_id стикера, который показывается перед готовым промптом
 
@@ -44,6 +46,7 @@ ADMIN_ID = int(ADMIN_ID) if ADMIN_ID else None
 
 MODEL = "openai/gpt-oss-120b"
 VISION_MODEL = "qwen/qwen3.6-27b"
+DEEPSEEK_MODEL = "deepseek/deepseek-v4-flash"  # основная модель для обычного чата, если ключ задан
 HISTORY_FILE = "history.json"
 USERS_FILE = "users.json"
 FAVORITES_FILE = "favorites.json"
@@ -61,6 +64,39 @@ dp = Dispatcher()
 # max_retries=0 — чтобы при лимите Groq бот сразу отвечал понятным сообщением,
 # а не "молчал" по 20-30 секунд, пока SDK сам пытается повторить запрос
 groq_client = Groq(api_key=GROQ_API_KEY, max_retries=0)
+
+openrouter_client = (
+    OpenAI(api_key=OPENROUTER_API_KEY, base_url="https://openrouter.ai/api/v1", max_retries=0)
+    if OPENROUTER_API_KEY
+    else None
+)
+
+
+def chat_completion_with_fallback(messages: list, temperature: float = 0.85, max_tokens: int = 1024) -> str:
+    """
+    Пробует ответить через DeepSeek Flash (OpenRouter) — дешевле и часто качественнее для
+    обычного текстового общения. Если ключ не задан или запрос не удался — прозрачно
+    откатывается на Groq, чтобы бот не переставал работать.
+    """
+    if openrouter_client is not None:
+        try:
+            response = openrouter_client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception:
+            logging.exception("DeepSeek (OpenRouter) недоступен, переключаюсь на Groq")
+
+    response = groq_client.chat.completions.create(
+        model=MODEL,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return response.choices[0].message.content
 
 
 async def _typing_loop(chat_id: int, action: str = "typing"):
@@ -1538,15 +1574,9 @@ async def get_ai_reply(
     messages = [{"role": "system", "content": system_prompt}] + trimmed_history
 
     try:
-        response = groq_client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            temperature=0.85,
-            max_tokens=1024,
-        )
-        reply = clean_reply(response.choices[0].message.content)
+        reply = clean_reply(chat_completion_with_fallback(messages, temperature=0.85, max_tokens=1024))
     except Exception as e:
-        logging.exception("Ошибка при обращении к Groq API")
+        logging.exception("Ошибка при обращении к AI")
         reply = describe_groq_error(e)
 
     history.append({"role": "assistant", "content": reply})
