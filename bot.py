@@ -543,6 +543,47 @@ async def comment_on_gallery(
         return None
 
 
+async def fetch_public_chat(limit: int = 15) -> list[dict] | None:
+    """Последние сообщения общего публичного чата. None — если сайт недоступен."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{BOTYARA_API_URL}/api/bot/public-chat",
+                params={"limit": limit},
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json().get("messages", [])
+    except Exception:
+        logging.exception("Не удалось получить сообщения общего чата")
+        return None
+
+
+async def send_public_chat(user_id: int, username: str | None, first_name: str | None, content: str) -> dict | None:
+    """Отправляет сообщение в общий публичный чат (проходит модерацию). None — если сайт недоступен."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{BOTYARA_API_URL}/api/bot/public-chat",
+                json={
+                    "telegram_id": user_id,
+                    "telegram_username": username,
+                    "telegram_first_name": first_name,
+                    "content": content,
+                },
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        logging.exception("Не удалось отправить сообщение в общий чат")
+        return None
+
+
 def record_message_stat():
     """Учитывает одно входящее сообщение (любого типа) в статистике."""
     stats["messages_total"] += 1
@@ -656,6 +697,9 @@ user_pending_announcement: dict[int, dict] = {}
 # user_id -> id поста, к которому пишется комментарий
 user_gallery_comment_target: dict[int, int] = {}
 
+# Пользователь нажал "Написать в общий чат" — ждём от него текстовое сообщение
+user_publicchat_pending: set[int] = set()
+
 
 def synthesize_speech_sync(text: str) -> str:
     """Синхронно генерирует mp3-файл с озвучкой текста (для запуска в отдельном потоке)."""
@@ -701,6 +745,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
             [InlineKeyboardButton(text="⭐ Избранное", callback_data="menu_favorites")],
             [InlineKeyboardButton(text="🖼️ Галерея", callback_data="menu_gallery")],
+            [InlineKeyboardButton(text="🌍 Общий чат", callback_data="menu_publicchat")],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu_help")],
         ]
     )
@@ -1560,6 +1605,46 @@ async def callback_gallery_comment_start(callback: CallbackQuery):
     await callback.message.answer("✏️ Напиши текст комментария следующим сообщением.")
 
 
+# ==================== Общий публичный чат ====================
+
+def public_chat_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✍️ Написать сообщение", callback_data="publicchat_write")],
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="menu_publicchat")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
+        ]
+    )
+
+
+@dp.callback_query(F.data == "menu_publicchat")
+async def callback_menu_publicchat(callback: CallbackQuery):
+    record_section_stat("publicchat")
+    messages = await fetch_public_chat(15)
+    if messages is None:
+        await callback.answer("Общий чат временно недоступен", show_alert=True)
+        return
+
+    if not messages:
+        text = "🌍 <b>Общий чат</b>\n\nПока пусто — все сообщения здесь видны всем пользователям бота."
+    else:
+        lines = ["🌍 <b>Общий чат</b>\n"]
+        for m in messages:
+            lines.append(f"<b>{m['author']}:</b> {m['content']}")
+        text = "\n".join(lines)
+
+    await show_menu_screen(callback, text, public_chat_keyboard())
+
+
+@dp.callback_query(F.data == "publicchat_write")
+async def callback_publicchat_write(callback: CallbackQuery):
+    user_publicchat_pending.add(callback.from_user.id)
+    await callback.answer()
+    await callback.message.answer(
+        "✏️ Напиши сообщение следующим текстом — его увидят все пользователи в общем чате."
+    )
+
+
 @dp.callback_query(F.data == "menu_prompts")
 async def callback_menu_prompts(callback: CallbackQuery):
     record_section_stat("prompts")
@@ -2073,6 +2158,23 @@ async def handle_message(message: Message):
         else:
             await message.answer(
                 f"🚫 Комментарий отклонён модерацией: {result.get('reject_reason') or 'нарушение правил платформы'}",
+                reply_markup=main_menu_button_keyboard(),
+            )
+        return
+
+    # Если пользователь только что нажал "Написать сообщение" в общем чате —
+    # это сообщение и есть текст для общего чата
+    if user_id in user_publicchat_pending:
+        user_publicchat_pending.discard(user_id)
+        await bot.send_chat_action(message.chat.id, "typing")
+        result = await send_public_chat(user_id, message.from_user.username, message.from_user.first_name, message.text)
+        if result is None:
+            await message.answer("Общий чат временно недоступен — попробуй чуть позже.", reply_markup=main_menu_button_keyboard())
+        elif result.get("status") == "approved":
+            await message.answer("✅ Сообщение опубликовано в общем чате!", reply_markup=main_menu_button_keyboard())
+        else:
+            await message.answer(
+                f"🚫 Сообщение отклонено модерацией: {result.get('reject_reason') or 'нарушение правил платформы'}",
                 reply_markup=main_menu_button_keyboard(),
             )
         return
