@@ -516,6 +516,9 @@ user_translate_mode: dict[int, dict] = {}
 
 # Храним, у кого сейчас включён режим составления промптов (и историю диалога по теме)
 user_prompt_mode: dict[int, str] = {}  # user_id -> "suno" / "image" / "video"
+
+# Присланные кадры для темы "video": user_id -> {"first": base64|None, "last": base64|None, "note": str}
+user_video_frames: dict[int, dict] = {}
 user_prompt_histories: dict[int, list] = {}
 user_prompt_target: dict[int, str] = {}  # user_id -> выбранная версия/нейросеть (текст для показа)
 
@@ -776,12 +779,19 @@ PROMPT_CONFIG = {
             ("veo", "Veo"),
         ],
         "intro_after_target": (
-            "✅ Нейросеть: <b>{target}</b>\n\nОпиши идею сцены."
+            "✅ Нейросеть: <b>{target}</b>\n\nОпиши идею сцены.\n\n"
+            "💡 Можно и по-другому: пришли картинкой первый (и, если есть, последний) кадр сцены — "
+            "учту их визуально при составлении промпта. Пришлёшь только один кадр — тоже сработает, "
+            "просто опиши остальное словами."
         ),
         "system_prompt": (
             "Ты — эксперт по составлению промптов для генерации видео через нейросети "
             "(Sora, Runway, Kling, Veo, Pika и подобные). Твоя задача — помочь пользователю "
             "составить качественный промпт. Веди диалог по существу:\n"
+            "0. Если пользователь ещё не присылал изображения кадров, в самом начале обязательно "
+            "спроси: есть ли у него референсные кадры — первый и/или последний кадр сцены "
+            "(можно прислать картинками, это очень поможет с деталями). Если кадров нет — "
+            "предложи просто описать сцену словами и продолжай без них.\n"
             "1. Уточни сюжет сцены, движение камеры (панорама, наезд, статика и т.д.), стиль "
             "(кино, реализм, анимация), освещение, длительность, темп действия, звук/музыку если поддерживается.\n"
             "Задавай не больше 1-2 уточняющих вопросов за раз.\n"
@@ -884,6 +894,60 @@ async def get_image_prompt_from_photo(user_id: int, image_base64: str, desired_c
 
     # В историю добавляем текстовый след, чтобы дальнейшие уточнения помнили контекст
     history.append({"role": "user", "content": f"[Прислал фото] Хочу изменить: {desired_change}"})
+    history.append({"role": "assistant", "content": reply})
+    return reply
+
+
+async def get_video_prompt_from_frames(
+    user_id: int, description: str, first_b64: str | None, last_b64: str | None
+) -> str:
+    """Составляет видео-промпт по присланным кадрам (первому и/или последнему) и описанию словами."""
+    config = PROMPT_CONFIG["video"]
+    history = user_prompt_histories.setdefault(user_id, [])
+
+    target = user_prompt_target.get(user_id)
+    target_note = (
+        f"Пользователь уже выбрал нейросеть: {target}. Готовый промпт формируй именно под неё, "
+        "не спрашивай про это повторно. "
+        if target
+        else ""
+    )
+
+    combined_system = (
+        config["system_prompt"]
+        + "\n\nПользователь прислал референсные кадры сцены (первый и/или последний кадр видео). "
+        + target_note
+        + "Учти визуальные детали кадров при составлении промпта, сразу выдай готовый промпт "
+        "с пометкой 'ГОТОВЫЙ ПРОМПТ:'."
+    )
+
+    content = [{"type": "text", "text": description or "Опиши сцену по присланным кадрам."}]
+    if first_b64:
+        content.append({"type": "text", "text": "Это первый кадр сцены:"})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{first_b64}"}})
+    if last_b64:
+        content.append({"type": "text", "text": "Это последний кадр сцены:"})
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{last_b64}"}})
+
+    trimmed_history = history[-10:]
+    messages = [{"role": "system", "content": combined_system}] + trimmed_history + [
+        {"role": "user", "content": content}
+    ]
+
+    try:
+        response = groq_client.chat.completions.create(
+            model=VISION_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=2048,
+            reasoning_format="hidden",
+        )
+        reply = clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при составлении промпта по кадрам видео")
+        reply = describe_groq_error(e)
+
+    history.append({"role": "user", "content": f"[Прислал кадры видео] {description}"})
     history.append({"role": "assistant", "content": reply})
     return reply
 
@@ -1382,6 +1446,7 @@ async def callback_prompt_select(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_prompt_mode[user_id] = topic
     user_prompt_target.pop(user_id, None)
+    user_video_frames.pop(user_id, None)
     config = PROMPT_CONFIG[topic]
     await show_menu_screen(callback, config["target_question"], prompt_target_keyboard(topic))
 
@@ -1397,6 +1462,7 @@ async def callback_prompt_target(callback: CallbackQuery):
     user_prompt_target[user_id] = target_label
     user_prompt_mode[user_id] = topic
     user_prompt_histories[user_id] = []  # начинаем тему с чистого листа
+    user_video_frames.pop(user_id, None)
 
     intro = config["intro_after_target"].format(target=target_label)
     await show_menu_screen(callback, intro, prompt_active_keyboard())
@@ -1408,6 +1474,7 @@ async def callback_menu_back(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
     user_cover_state.pop(callback.from_user.id, None)
+    user_video_frames.pop(callback.from_user.id, None)
     await show_menu_screen(callback, MENU_MAIN_TEXT, main_menu_keyboard())
 
 
@@ -2006,6 +2073,33 @@ async def handle_photo(message: Message):
             message.chat.id,
             get_image_prompt_from_photo(message.from_user.id, image_base64, message.caption),
         )
+        await send_prompt_reply(message.chat.id, reply, prompt_active_keyboard())
+        return
+
+    # Если у пользователя включён режим составления промпта для видео —
+    # первое фото сохраняем как первый кадр, второе — как последний, и составляем промпт
+    if user_prompt_mode.get(message.from_user.id) == "video":
+        user_id = message.from_user.id
+        frames = user_video_frames.setdefault(user_id, {"first": None, "last": None, "note": ""})
+        if message.caption:
+            frames["note"] = (frames["note"] + " " + message.caption).strip()
+
+        if frames["first"] is None:
+            frames["first"] = image_base64
+            await message.answer(
+                "🎬 Сохранил как первый кадр!\n\n"
+                "Можешь прислать ещё и последний кадр сцены — или просто опиши словами, "
+                "что происходит между ними, и я составлю промпт.",
+                reply_markup=prompt_active_keyboard(),
+            )
+            return
+
+        frames["last"] = image_base64
+        reply = await with_typing(
+            message.chat.id,
+            get_video_prompt_from_frames(user_id, frames["note"], frames["first"], frames["last"]),
+        )
+        user_video_frames.pop(user_id, None)
         await send_prompt_reply(message.chat.id, reply, prompt_active_keyboard())
         return
 
