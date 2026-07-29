@@ -438,7 +438,7 @@ async def sync_message_to_site(
 
 
 async def sync_favorite_to_site(
-    user_id: int, username: str | None, first_name: str | None, content: str
+    user_id: int, username: str | None, first_name: str | None, content: str, category: str = "other"
 ):
     """Отправляет сохранённый промпт в общее избранное на сайте."""
     if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
@@ -452,6 +452,7 @@ async def sync_favorite_to_site(
                     "telegram_username": username,
                     "telegram_first_name": first_name,
                     "content": content,
+                    "category": category,
                 },
                 headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
             )
@@ -582,6 +583,21 @@ async def send_public_chat(user_id: int, username: str | None, first_name: str |
     except Exception:
         logging.exception("Не удалось отправить сообщение в общий чат")
         return None
+
+
+async def save_announcement_to_site(content: str) -> None:
+    """Сохраняет оповещение об обновлении на сайте (лента в разделе уведомлений)."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            await client.post(
+                f"{BOTYARA_API_URL}/api/bot/announcements",
+                json={"content": content},
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+    except Exception:
+        logging.exception("Не удалось сохранить оповещение на сайте (не критично)")
 
 
 def record_message_stat():
@@ -1466,7 +1482,11 @@ async def callback_fav_save(callback: CallbackQuery):
     save_favorites()
 
     await sync_favorite_to_site(
-        user_id, callback.from_user.username, callback.from_user.first_name, prompt_text
+        user_id,
+        callback.from_user.username,
+        callback.from_user.first_name,
+        prompt_text,
+        category=user_prompt_mode.get(user_id, "other"),
     )
 
     await callback.answer("Сохранено в избранное ⭐")
@@ -2092,6 +2112,7 @@ async def callback_announce_send(callback: CallbackQuery):
     await callback.message.edit_reply_markup(reply_markup=None)
 
     text = pending["text"]
+    await save_announcement_to_site(text)
     await bot.send_message(callback.from_user.id, f"Начинаю рассылку на {len(registered_users)} пользователей...")
 
     sent = 0
