@@ -195,6 +195,50 @@ ROLE_CONFIG = {
 
 DEFAULT_ROLE = "default"
 
+# ==================== ОПОВЕЩЕНИЯ ОБ ОБНОВЛЕНИЯХ (для админа) ====================
+
+ANNOUNCE_SYSTEM_PROMPT = (
+    "Ты — автор дружелюбных, живых постов об обновлениях Telegram-бота «Ботяра» "
+    "(нейро-помощник: общение, переводчик, промпты для музыки/картинок/видео, обложки треков). "
+    "Стиль бота — неформальный, с юмором, на \"ты\", уместные эмодзи, без канцелярита и воды.\n\n"
+    "Тебе дают список того, что изменилось (иногда сухими фразами или просто списком) — "
+    "превращай это в один цельный, воодушевляющий пост для рассылки пользователям бота.\n\n"
+    "Правила:\n"
+    "- НЕ используй HTML-теги (<b>, <i> и т.п.) — они не поддерживаются, пиши только простым текстом.\n"
+    "- Используй эмодзи по смыслу, но не перегружай ими.\n"
+    "- Короткие абзацы, разделяй их пустой строкой.\n"
+    "- Заверши бодрым призывом попробовать новое прямо сейчас.\n"
+    "- Ответь только готовым текстом поста, без пояснений от себя."
+)
+
+
+async def generate_announcement(raw_notes: str) -> str:
+    """Просит нейросеть красиво оформить список изменений в пост для рассылки пользователям."""
+    try:
+        response = groq_client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": ANNOUNCE_SYSTEM_PROMPT},
+                {"role": "user", "content": raw_notes},
+            ],
+            temperature=0.8,
+            max_tokens=800,
+        )
+        return clean_reply(response.choices[0].message.content)
+    except Exception as e:
+        logging.exception("Ошибка при генерации оповещения об обновлении")
+        return describe_groq_error(e)
+
+
+def announce_confirm_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Разослать всем", callback_data="announce_send")],
+            [InlineKeyboardButton(text="🔄 Переписать заново", callback_data="announce_retry")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="announce_cancel")],
+        ]
+    )
+
 WELCOME_IMAGE = "welcome.jpg"
 WELCOME_TEXT = (
     "🤖 <b>ЙО! ДОБРО ПОЖАЛОВАТЬ В МИР БОТЯРЫ!</b>\n\n"
@@ -480,6 +524,10 @@ user_cover_state: dict[int, dict] = {}
 
 # Храним, у кого включена озвучка ответов в обычном общении (по умолчанию выключена)
 user_tts_enabled: dict[int, bool] = {}
+
+# Черновик оповещения об обновлении, которое администратор готовит перед рассылкой:
+# admin_id -> {"raw": исходный текст, "text": текст, оформленный нейросетью}
+user_pending_announcement: dict[int, dict] = {}
 
 
 def synthesize_speech_sync(text: str) -> str:
@@ -1634,6 +1682,93 @@ async def cmd_broadcast_text(message: Message):
         await asyncio.sleep(0.05)
 
     await message.answer(f"Готово! Успешно: {sent}, не удалось: {failed}")
+
+
+@dp.message(F.text.startswith("/announce"))
+async def cmd_announce(message: Message):
+    """
+    Админ присылает краткое описание того, что обновилось — нейросеть оформляет это
+    в красивый пост, показывает его на подтверждение и только после согласия рассылает всем.
+    Формат: /announce добавили роли общения, смену пароля, мобильную версию сайта
+    """
+    if not is_admin(message.from_user.id):
+        return
+
+    raw_notes = message.text[len("/announce"):].strip()
+    if not raw_notes:
+        await message.answer(
+            "Использование:\n"
+            "/announce <кратко, что обновилось>\n\n"
+            "Например:\n"
+            "/announce добавили роли общения (друг, наставник и другие), смену пароля в аккаунте, "
+            "мобильную версию сайта"
+        )
+        return
+
+    await bot.send_chat_action(message.chat.id, "typing")
+    announcement = await generate_announcement(raw_notes)
+    user_pending_announcement[message.from_user.id] = {"raw": raw_notes, "text": announcement}
+
+    await message.answer(
+        "📢 Вот что получилось — рассылаем как есть, переписать ещё раз, или отменить?\n\n" + announcement,
+        reply_markup=announce_confirm_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "announce_send")
+async def callback_announce_send(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    pending = user_pending_announcement.pop(callback.from_user.id, None)
+    if not pending:
+        await callback.answer("Черновик не найден — начни заново через /announce", show_alert=True)
+        return
+
+    await callback.answer()
+    await callback.message.edit_reply_markup(reply_markup=None)
+
+    text = pending["text"]
+    await bot.send_message(callback.from_user.id, f"Начинаю рассылку на {len(registered_users)} пользователей...")
+
+    sent = 0
+    failed = 0
+    for user_id in list(registered_users):
+        try:
+            await bot.send_message(user_id, text)
+            sent += 1
+        except Exception as e:
+            logging.warning(f"Не удалось отправить оповещение пользователю {user_id}: {e}")
+            failed += 1
+        await asyncio.sleep(0.05)
+
+    await bot.send_message(callback.from_user.id, f"Готово! Успешно: {sent}, не удалось: {failed}")
+
+
+@dp.callback_query(F.data == "announce_retry")
+async def callback_announce_retry(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    pending = user_pending_announcement.get(callback.from_user.id)
+    if not pending:
+        await callback.answer("Черновик не найден — начни заново через /announce", show_alert=True)
+        return
+
+    await callback.answer("Переписываю…")
+    new_text = await generate_announcement(pending["raw"])
+    user_pending_announcement[callback.from_user.id]["text"] = new_text
+    await callback.message.edit_text(
+        "📢 Вот что получилось — рассылаем как есть, переписать ещё раз, или отменить?\n\n" + new_text,
+        reply_markup=announce_confirm_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "announce_cancel")
+async def callback_announce_cancel(callback: CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return
+    user_pending_announcement.pop(callback.from_user.id, None)
+    await callback.answer("Отменено")
+    await callback.message.edit_reply_markup(reply_markup=None)
 
 
 # ==================== ОБЫЧНЫЕ СООБЩЕНИЯ ====================
