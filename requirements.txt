@@ -1,4 +1,6 @@
 aiogram
 groq
+openai
 python-dotenv
 gTTS
+httpx
