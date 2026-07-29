@@ -459,6 +459,90 @@ async def sync_favorite_to_site(
         logging.exception("Не удалось отправить избранное на сайт (не критично, бот продолжает работать)")
 
 
+async def fetch_gallery_list(limit: int = 15) -> list[dict] | None:
+    """Список последних опубликованных промптов галереи. None — если сайт недоступен."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{BOTYARA_API_URL}/api/bot/gallery",
+                params={"limit": limit},
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json().get("posts", [])
+    except Exception:
+        logging.exception("Не удалось получить список галереи")
+        return None
+
+
+async def fetch_gallery_post(post_id: int) -> dict | None:
+    """Один пост галереи с комментариями. None — если сайт недоступен или пост не найден."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{BOTYARA_API_URL}/api/bot/gallery/{post_id}",
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        logging.exception("Не удалось получить пост галереи")
+        return None
+
+
+async def publish_to_gallery(user_id: int, username: str | None, first_name: str | None, content: str) -> dict | None:
+    """Публикует промпт в галерею (проходит модерацию на бэкенде). None — если сайт недоступен."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{BOTYARA_API_URL}/api/bot/gallery/publish",
+                json={
+                    "telegram_id": user_id,
+                    "telegram_username": username,
+                    "telegram_first_name": first_name,
+                    "content": content,
+                },
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        logging.exception("Не удалось опубликовать в галерею")
+        return None
+
+
+async def comment_on_gallery(
+    user_id: int, username: str | None, first_name: str | None, post_id: int, content: str
+) -> dict | None:
+    """Отправляет комментарий к посту галереи (тоже проходит модерацию). None — если сайт недоступен."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{BOTYARA_API_URL}/api/bot/gallery/comment",
+                json={
+                    "telegram_id": user_id,
+                    "telegram_username": username,
+                    "telegram_first_name": first_name,
+                    "post_id": post_id,
+                    "content": content,
+                },
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json()
+    except Exception:
+        logging.exception("Не удалось отправить комментарий в галерею")
+        return None
+
+
 def record_message_stat():
     """Учитывает одно входящее сообщение (любого типа) в статистике."""
     stats["messages_total"] += 1
@@ -568,6 +652,10 @@ user_tts_enabled: dict[int, bool] = {}
 # admin_id -> {"raw": исходный текст, "text": текст, оформленный нейросетью}
 user_pending_announcement: dict[int, dict] = {}
 
+# Пользователь нажал "Написать комментарий" к посту галереи — ждём от него текстовое сообщение:
+# user_id -> id поста, к которому пишется комментарий
+user_gallery_comment_target: dict[int, int] = {}
+
 
 def synthesize_speech_sync(text: str) -> str:
     """Синхронно генерирует mp3-файл с озвучкой текста (для запуска в отдельном потоке)."""
@@ -612,6 +700,7 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="🎨 Промпты", callback_data="menu_prompts")],
             [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
             [InlineKeyboardButton(text="⭐ Избранное", callback_data="menu_favorites")],
+            [InlineKeyboardButton(text="🖼️ Галерея", callback_data="menu_gallery")],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu_help")],
         ]
     )
@@ -1338,9 +1427,13 @@ async def callback_fav_save(callback: CallbackQuery):
     await callback.answer("Сохранено в избранное ⭐")
 
 
-def favorites_list_keyboard(has_items: bool) -> InlineKeyboardMarkup:
+def favorites_list_keyboard(favorites: list[str]) -> InlineKeyboardMarkup:
     rows = []
-    if has_items:
+    for i in range(len(favorites)):
+        rows.append(
+            [InlineKeyboardButton(text=f"📢 Опубликовать #{i + 1} в галерею", callback_data=f"gallery_pub_{i}")]
+        )
+    if favorites:
         rows.append([InlineKeyboardButton(text="🗑 Очистить всё", callback_data="fav_clear")])
     rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1354,7 +1447,7 @@ async def callback_menu_favorites(callback: CallbackQuery):
 
     if not favorites:
         text = "⭐ <b>Избранное</b>\n\nПока пусто. Сохраняй промпты кнопкой ⭐ под готовым результатом."
-        await show_menu_screen(callback, text, favorites_list_keyboard(has_items=False))
+        await show_menu_screen(callback, text, favorites_list_keyboard([]))
         return
 
     # Показываем список коротким превью — полный текст лучше смотреть в самих сохранённых сообщениях
@@ -1366,7 +1459,7 @@ async def callback_menu_favorites(callback: CallbackQuery):
         lines.append(f"{i}. {preview}")
     text = "\n".join(lines)
 
-    await show_menu_screen(callback, text, favorites_list_keyboard(has_items=True))
+    await show_menu_screen(callback, text, favorites_list_keyboard(favorites))
 
 
 @dp.callback_query(F.data == "fav_clear")
@@ -1375,7 +1468,96 @@ async def callback_fav_clear(callback: CallbackQuery):
     user_favorites[user_id] = []
     save_favorites()
     text = "⭐ <b>Избранное</b>\n\nПока пусто. Сохраняй промпты кнопкой ⭐ под готовым результатом."
-    await show_menu_screen(callback, text, favorites_list_keyboard(has_items=False))
+    await show_menu_screen(callback, text, favorites_list_keyboard([]))
+
+
+@dp.callback_query(F.data.startswith("gallery_pub_"))
+async def callback_gallery_publish_from_favorites(callback: CallbackQuery):
+    """Публикует конкретный промпт из избранного в общую галерею (с модерацией на бэкенде)."""
+    user_id = callback.from_user.id
+    idx = int(callback.data.rsplit("_", 1)[-1])
+    favorites = user_favorites.get(user_id, [])
+    if idx < 0 or idx >= len(favorites):
+        await callback.answer("Промпт не найден", show_alert=True)
+        return
+
+    await callback.answer("Публикую…")
+    result = await publish_to_gallery(user_id, callback.from_user.username, callback.from_user.first_name, favorites[idx])
+    if result is None:
+        await callback.message.answer("Галерея временно недоступна — попробуй чуть позже.")
+    elif result.get("status") == "approved":
+        await callback.message.answer("✅ Опубликовано в галерее! Загляни в раздел «🖼️ Галерея».")
+    else:
+        await callback.message.answer(
+            f"🚫 Отклонено модерацией: {result.get('reject_reason') or 'нарушение правил платформы'}"
+        )
+
+
+# ==================== Галерея промптов ====================
+
+def gallery_list_keyboard(posts: list[dict]) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"Открыть #{p['id']} · 💬{p['comment_count']}", callback_data=f"gallery_open_{p['id']}")]
+        for p in posts
+    ]
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def gallery_post_keyboard(post_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="💬 Написать комментарий", callback_data=f"gallery_comment_{post_id}")],
+            [InlineKeyboardButton(text="◀️ К галерее", callback_data="menu_gallery")],
+        ]
+    )
+
+
+@dp.callback_query(F.data == "menu_gallery")
+async def callback_menu_gallery(callback: CallbackQuery):
+    record_section_stat("gallery")
+    posts = await fetch_gallery_list(15)
+    if posts is None:
+        await callback.answer("Галерея временно недоступна", show_alert=True)
+        return
+    if not posts:
+        text = "🖼️ <b>Галерея</b>\n\nПока пусто — опубликуй что-нибудь из своего Избранного!"
+        await show_menu_screen(callback, text, back_keyboard())
+        return
+
+    lines = ["🖼️ <b>Галерея</b>\n"]
+    for p in posts:
+        preview = p["content"].replace("\n", " ").strip()
+        if len(preview) > 70:
+            preview = preview[:70] + "…"
+        lines.append(f"#{p['id']} · {p['author']}: {preview}")
+    text = "\n".join(lines)
+
+    await show_menu_screen(callback, text, gallery_list_keyboard(posts))
+
+
+@dp.callback_query(F.data.startswith("gallery_open_"))
+async def callback_gallery_open(callback: CallbackQuery):
+    post_id = int(callback.data.rsplit("_", 1)[-1])
+    post = await fetch_gallery_post(post_id)
+    if post is None:
+        await callback.answer("Не удалось загрузить пост", show_alert=True)
+        return
+
+    lines = [f"🖼️ Пост от {post['author']}:\n", post["content"], f"\n💬 Комментарии ({len(post['comments'])}):"]
+    for c in post["comments"][-10:]:
+        lines.append(f"— {c['author']}: {c['content']}")
+    text = "\n".join(lines)
+
+    await show_menu_screen(callback, text, gallery_post_keyboard(post_id))
+
+
+@dp.callback_query(F.data.startswith("gallery_comment_"))
+async def callback_gallery_comment_start(callback: CallbackQuery):
+    post_id = int(callback.data.rsplit("_", 1)[-1])
+    user_gallery_comment_target[callback.from_user.id] = post_id
+    await callback.answer()
+    await callback.message.answer("✏️ Напиши текст комментария следующим сообщением.")
 
 
 @dp.callback_query(F.data == "menu_prompts")
@@ -1875,6 +2057,25 @@ async def handle_message(message: Message):
     register_user(message.from_user.id)
     record_message_stat()
     user_id = message.from_user.id
+
+    # Если пользователь только что нажал "Написать комментарий" к посту галереи —
+    # это сообщение и есть текст комментария
+    pending_post_id = user_gallery_comment_target.pop(user_id, None)
+    if pending_post_id is not None:
+        await bot.send_chat_action(message.chat.id, "typing")
+        result = await comment_on_gallery(
+            user_id, message.from_user.username, message.from_user.first_name, pending_post_id, message.text
+        )
+        if result is None:
+            await message.answer("Галерея временно недоступна — попробуй чуть позже.", reply_markup=main_menu_button_keyboard())
+        elif result.get("status") == "approved":
+            await message.answer("✅ Комментарий опубликован!", reply_markup=main_menu_button_keyboard())
+        else:
+            await message.answer(
+                f"🚫 Комментарий отклонён модерацией: {result.get('reject_reason') or 'нарушение правил платформы'}",
+                reply_markup=main_menu_button_keyboard(),
+            )
+        return
 
     # Если у пользователя открыт мастер "Обложка трека" — обрабатываем текст по шагам
     cover_state = user_cover_state.get(user_id)
