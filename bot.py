@@ -48,6 +48,7 @@ HISTORY_FILE = "history.json"
 USERS_FILE = "users.json"
 FAVORITES_FILE = "favorites.json"
 STATS_FILE = "stats.json"
+ROLES_FILE = "user_roles.json"
 
 # Лимит: не больше RATE_LIMIT_COUNT запросов за RATE_LIMIT_WINDOW секунд на пользователя
 RATE_LIMIT_COUNT = 5
@@ -110,12 +111,97 @@ async def send_prompt_reply(chat_id: int, reply_text: str, keyboard: InlineKeybo
 
 SYSTEM_PROMPT = "Ты дружелюбный ассистент, отвечай кратко и по делу на русском языке."
 
+# ==================== РОЛИ ДЛЯ ОБЩЕНИЯ (те же, что и на сайте) ====================
+
+ROLE_COMMON_RULES = (
+    "Общие правила общения (важно соблюдать всегда):\n"
+    "- Говори живо, естественно, как реальный человек в переписке — короткими репликами, "
+    "без канцелярита и занудных вступлений вроде 'Конечно! Вот что...'.\n"
+    "- Реагируй эмоционально на то, что говорит собеседник — удивляйся, радуйся, сочувствуй, "
+    "если это уместно по контексту.\n"
+    "- Задавай встречные вопросы, поддерживай разговор, а не просто выдавай информацию.\n"
+    "- Не упоминай, что ты нейросеть или языковая модель, если тебя прямо об этом не спросили.\n"
+    "- Пиши без длинных списков и заголовков — это переписка, а не документ.\n"
+    "- Используй уместный юмор и лёгкую иронию там, где это подходит по характеру роли.\n"
+)
+
+ROLE_CONFIG = {
+    "default": {
+        "label": "Обычное общение",
+        "emoji": "🤖",
+        "system_prompt": SYSTEM_PROMPT,
+    },
+    "friend": {
+        "label": "Лучший друг",
+        "emoji": "🧑‍🤝‍🧑",
+        "system_prompt": (
+            ROLE_COMMON_RULES
+            + "\nТы — лучший друг пользователя. Общайся неформально, на \"ты\", с юмором и "
+            "лёгким сленгом. Ты всегда на стороне собеседника, поддерживаешь его, но можешь и "
+            "по-дружески подколоть. Искренне интересуешься, как у него дела."
+        ),
+    },
+    "mentor": {
+        "label": "Мудрый наставник",
+        "emoji": "🧙",
+        "system_prompt": (
+            ROLE_COMMON_RULES
+            + "\nТы — мудрый наставник с большим жизненным опытом. Говоришь спокойно и вдумчиво, "
+            "иногда приводишь метафоры или короткие истории для примера. Не поучаешь свысока, "
+            "а делишься опытом на равных. Помогаешь увидеть ситуацию под другим углом."
+        ),
+    },
+    "listener": {
+        "label": "Внимательный собеседник",
+        "emoji": "🕊",
+        "system_prompt": (
+            ROLE_COMMON_RULES
+            + "\nТы — тёплый, эмпатичный собеседник, который умеет слушать. Не оцениваешь и не "
+            "критикуешь, отражаешь чувства собеседника, задаёшь мягкие уточняющие вопросы. "
+            "Создаёшь ощущение, что его действительно слышат."
+        ),
+    },
+    "wit": {
+        "label": "Остроумный циник",
+        "emoji": "😏",
+        "system_prompt": (
+            ROLE_COMMON_RULES
+            + "\nТы — остроумный собеседник с сухим, слегка циничным чувством юмора. Любишь "
+            "подколоть, пошутить с сарказмом, но не переходишь на откровенную грубость или "
+            "оскорбления. За иронией видна теплота к собеседнику."
+        ),
+    },
+    "motivator": {
+        "label": "Мотиватор",
+        "emoji": "🔥",
+        "system_prompt": (
+            ROLE_COMMON_RULES
+            + "\nТы — заряженный энергией мотиватор. Веришь в собеседника больше, чем он сам "
+            "в себя, подбадриваешь, помогаешь увидеть возможности, а не препятствия. Говоришь "
+            "энергично, но не переигрывай в наигранный пафос — искренне и по делу."
+        ),
+    },
+    "flirty": {
+        "label": "Лёгкий флирт",
+        "emoji": "😉",
+        "system_prompt": (
+            ROLE_COMMON_RULES
+            + "\nТы — игривый, обаятельный собеседник, который любит лёгкий флирт: комплименты, "
+            "дружеские подколки, немного интриги в тоне. Держись в рамках приличия — флирт лёгкий "
+            "и уважительный, без пошлости и явного сексуального содержания."
+        ),
+    },
+}
+
+DEFAULT_ROLE = "default"
+
 WELCOME_IMAGE = "welcome.jpg"
 WELCOME_TEXT = (
     "🤖 <b>ЙО! ДОБРО ПОЖАЛОВАТЬ В МИР БОТЯРЫ!</b>\n\n"
     "Нажал старт — красавчик, теперь ты в деле 😈\n\n"
     "Что я умею:\n"
     "💬 Шарю за любые темы — просто пиши\n"
+    "🎭 Можешь выбрать роль общения (друг, наставник, мотиватор и другие) — в разделе «Общение»\n"
     "🎤 Понимаю войсы — шли голосом\n"
     "📸 Разбираю фотки — гружу, вижу, отвечаю\n"
     "🌐 Шпарю переводы на любой язык\n"
@@ -138,19 +224,52 @@ def load_json_file(path: str, default):
 
 
 def load_histories() -> dict:
-    """Загружает историю диалогов из файла при запуске бота."""
+    """
+    Загружает историю диалогов из файла при запуске бота.
+    Формат: user_id -> {role_id: [сообщения]} — отдельная история на каждую роль,
+    как вкладки на сайте. Если в файле старый формат (просто список сообщений на
+    пользователя, без ролей) — переносим его в роль "default", чтобы не потерять историю.
+    """
     raw = load_json_file(HISTORY_FILE, {})
-    # Ключи в JSON всегда строки, а user_id — число, поэтому конвертируем обратно
-    return {int(k): v for k, v in raw.items()}
+    result = {}
+    for k, v in raw.items():
+        user_id = int(k)
+        if isinstance(v, list):
+            result[user_id] = {"default": v}
+        else:
+            result[user_id] = v
+    return result
 
 
 def save_histories():
-    """Сохраняет текущую историю диалогов в файл."""
+    """Сохраняет текущую историю диалогов (по всем ролям) в файл."""
     try:
         with open(HISTORY_FILE, "w", encoding="utf-8") as f:
             json.dump(user_histories, f, ensure_ascii=False, indent=2)
     except Exception as e:
         logging.exception(f"НЕ УДАЛОСЬ сохранить историю: {e}")
+
+
+def get_user_history(user_id: int, role: str) -> list:
+    """Возвращает (создавая при необходимости) список сообщений конкретного пользователя
+    для конкретной роли — отдельная история на каждую роль, не смешиваются."""
+    user_data = user_histories.setdefault(user_id, {})
+    return user_data.setdefault(role, [])
+
+
+def load_user_roles() -> dict:
+    """Загружает, какую роль общения выбрал каждый пользователь в последний раз."""
+    raw = load_json_file(ROLES_FILE, {})
+    return {int(k): v for k, v in raw.items()}
+
+
+def save_user_roles():
+    """Сохраняет выбранные роли пользователей в файл."""
+    try:
+        with open(ROLES_FILE, "w", encoding="utf-8") as f:
+            json.dump(user_roles, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logging.exception(f"НЕ УДАЛОСЬ сохранить роли пользователей: {e}")
 
 
 def load_users() -> set:
@@ -210,12 +329,13 @@ def save_stats():
 
 
 async def sync_message_to_site(
-    user_id: int, username: str | None, first_name: str | None, role: str, content: str
+    user_id: int, username: str | None, first_name: str | None, role: str, content: str, persona: str = "default"
 ):
     """
     Отправляет одно сообщение в botyara-api, чтобы оно попало в общую историю и было
     видно на сайте. Если сайт временно недоступен — просто пишем в лог и не мешаем боту
     работать дальше (история всё равно останется в локальном history.json).
+    persona — какая роль/вкладка общения (см. ROLE_CONFIG), не путать с role ("user"/"assistant").
     """
     if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
         return
@@ -229,6 +349,7 @@ async def sync_message_to_site(
                     "telegram_first_name": first_name,
                     "role": role,
                     "content": content,
+                    "persona": persona,
                 },
                 headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
             )
@@ -276,6 +397,7 @@ def record_section_stat(section: str):
 user_histories = load_histories()
 registered_users = load_users()
 user_favorites = load_favorites()  # user_id -> список сохранённых промптов
+user_roles = load_user_roles()  # user_id -> id выбранной роли общения (см. ROLE_CONFIG)
 stats = load_stats()
 
 # Храним последний сгенерированный промпт каждого пользователя — чтобы кнопка
@@ -426,22 +548,59 @@ def chat_settings_keyboard(user_id: int) -> InlineKeyboardMarkup:
     voice_on = user_tts_enabled.get(user_id, False)
     text_label = "✅ 💬 Текстом" if not voice_on else "⚪ 💬 Текстом"
     voice_label = "✅ 🎙 Голосом" if voice_on else "⚪ 🎙 Голосом"
+    role = user_roles.get(user_id, DEFAULT_ROLE)
+    role_cfg = ROLE_CONFIG.get(role, ROLE_CONFIG[DEFAULT_ROLE])
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
                 InlineKeyboardButton(text=text_label, callback_data="chat_mode_text"),
                 InlineKeyboardButton(text=voice_label, callback_data="chat_mode_voice"),
             ],
+            [
+                InlineKeyboardButton(
+                    text=f"🎭 Роль: {role_cfg['emoji']} {role_cfg['label']}", callback_data="chat_role_menu"
+                )
+            ],
+            [InlineKeyboardButton(text="🗑 Начать эту роль заново", callback_data="chat_role_reset")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
         ]
     )
 
 
+def role_menu_keyboard(user_id: int) -> InlineKeyboardMarkup:
+    """Клавиатура выбора роли общения — по две в ряд, текущая отмечена галочкой."""
+    current = user_roles.get(user_id, DEFAULT_ROLE)
+    items = list(ROLE_CONFIG.items())
+    rows = []
+    for i in range(0, len(items), 2):
+        row = []
+        for role_id, cfg in items[i : i + 2]:
+            mark = "✅ " if role_id == current else ""
+            row.append(
+                InlineKeyboardButton(text=f"{mark}{cfg['emoji']} {cfg['label']}", callback_data=f"set_role_{role_id}")
+            )
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_chat")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 MENU_MAIN_TEXT = "📋 <b>Главное меню</b>\n\nВыбери, что хочешь сделать:"
-MENU_CHAT_TEXT = (
-    "💬 <b>Режим общения</b>\n\n"
-    "Пиши мне текстом, голосом или фото — отвечу с помощью нейросети.\n\n"
-    "Выбери, как отвечать: текстом или голосовыми сообщениями 👇"
+
+
+def chat_menu_text(user_id: int) -> str:
+    role = user_roles.get(user_id, DEFAULT_ROLE)
+    role_cfg = ROLE_CONFIG.get(role, ROLE_CONFIG[DEFAULT_ROLE])
+    return (
+        "💬 <b>Режим общения</b>\n\n"
+        f"Сейчас общаешься с ролью: {role_cfg['emoji']} <b>{role_cfg['label']}</b>\n"
+        "Пиши мне текстом, голосом или фото — отвечу с помощью нейросети.\n\n"
+        "Настрой ниже 👇"
+    )
+
+
+ROLE_MENU_TEXT = (
+    "🎭 <b>С кем хочешь общаться?</b>\n\n"
+    "У каждой роли своя манера речи и своя отдельная история — как вкладки на сайте, они не смешиваются."
 )
 MENU_HELP_TEXT = (
     "ℹ️ <b>Помощь</b>\n\n"
@@ -911,14 +1070,41 @@ async def callback_menu_chat(callback: CallbackQuery):
     user_prompt_mode.pop(callback.from_user.id, None)
     user_prompt_target.pop(callback.from_user.id, None)
     user_cover_state.pop(callback.from_user.id, None)
-    await show_menu_screen(callback, MENU_CHAT_TEXT, chat_settings_keyboard(callback.from_user.id))
+    await show_menu_screen(callback, chat_menu_text(callback.from_user.id), chat_settings_keyboard(callback.from_user.id))
 
 
 @dp.callback_query(F.data.in_(["chat_mode_text", "chat_mode_voice"]))
 async def callback_chat_mode(callback: CallbackQuery):
     user_id = callback.from_user.id
     user_tts_enabled[user_id] = callback.data == "chat_mode_voice"
-    await show_menu_screen(callback, MENU_CHAT_TEXT, chat_settings_keyboard(user_id))
+    await show_menu_screen(callback, chat_menu_text(user_id), chat_settings_keyboard(user_id))
+
+
+@dp.callback_query(F.data == "chat_role_menu")
+async def callback_chat_role_menu(callback: CallbackQuery):
+    await show_menu_screen(callback, ROLE_MENU_TEXT, role_menu_keyboard(callback.from_user.id))
+
+
+@dp.callback_query(F.data.startswith("set_role_"))
+async def callback_set_role(callback: CallbackQuery):
+    role_id = callback.data[len("set_role_"):]
+    if role_id not in ROLE_CONFIG:
+        await callback.answer("Неизвестная роль", show_alert=True)
+        return
+    user_id = callback.from_user.id
+    user_roles[user_id] = role_id
+    save_user_roles()
+    await callback.answer(f"Роль изменена: {ROLE_CONFIG[role_id]['label']}")
+    await show_menu_screen(callback, chat_menu_text(user_id), chat_settings_keyboard(user_id))
+
+
+@dp.callback_query(F.data == "chat_role_reset")
+async def callback_chat_role_reset(callback: CallbackQuery):
+    user_id = callback.from_user.id
+    role = user_roles.get(user_id, DEFAULT_ROLE)
+    get_user_history(user_id, role).clear()
+    save_histories()
+    await callback.answer("История этой роли очищена ✅")
 
 
 @dp.callback_query(F.data == "menu_translate")
@@ -1182,7 +1368,9 @@ async def callback_menu_back(callback: CallbackQuery):
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     register_user(message.from_user.id)
-    user_histories[message.from_user.id] = []
+    user_histories[message.from_user.id] = {}
+    user_roles[message.from_user.id] = DEFAULT_ROLE
+    save_user_roles()
     user_translate_mode.pop(message.from_user.id, None)
     user_prompt_mode.pop(message.from_user.id, None)
     user_prompt_target.pop(message.from_user.id, None)
@@ -1201,9 +1389,14 @@ async def cmd_start(message: Message):
 
 @dp.message(F.text == "/reset")
 async def cmd_reset(message: Message):
-    user_histories[message.from_user.id] = []
+    user_id = message.from_user.id
+    role = user_roles.get(user_id, DEFAULT_ROLE)
+    role_label = ROLE_CONFIG.get(role, ROLE_CONFIG[DEFAULT_ROLE])["label"]
+    get_user_history(user_id, role).clear()
     save_histories()
-    await message.answer("История диалога очищена.", reply_markup=main_menu_button_keyboard())
+    await message.answer(
+        f"История для роли «{role_label}» очищена.", reply_markup=main_menu_button_keyboard()
+    )
 
 
 @dp.message(F.text == "/help")
@@ -1212,19 +1405,28 @@ async def cmd_help(message: Message):
 
 
 async def get_ai_reply(
-    user_id: int, user_text: str, username: str | None = None, first_name: str | None = None
+    user_id: int,
+    user_text: str,
+    username: str | None = None,
+    first_name: str | None = None,
+    role: str = DEFAULT_ROLE,
 ) -> str:
-    """Отправляет текст в Groq и возвращает ответ, обновляя историю диалога."""
-    history = user_histories.setdefault(user_id, [])
+    """Отправляет текст в Groq и возвращает ответ, обновляя историю диалога.
+    role — id выбранной роли общения (см. ROLE_CONFIG); у каждой роли своя история,
+    как отдельные вкладки на сайте."""
+    role_config = ROLE_CONFIG.get(role, ROLE_CONFIG[DEFAULT_ROLE])
+    system_prompt = role_config["system_prompt"]
+
+    history = get_user_history(user_id, role)
     history.append({"role": "user", "content": user_text})
     trimmed_history = history[-20:]
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + trimmed_history
+    messages = [{"role": "system", "content": system_prompt}] + trimmed_history
 
     try:
         response = groq_client.chat.completions.create(
             model=MODEL,
             messages=messages,
-            temperature=0.7,
+            temperature=0.85,
             max_tokens=1024,
         )
         reply = clean_reply(response.choices[0].message.content)
@@ -1235,8 +1437,8 @@ async def get_ai_reply(
     history.append({"role": "assistant", "content": reply})
     save_histories()
 
-    await sync_message_to_site(user_id, username, first_name, "user", user_text)
-    await sync_message_to_site(user_id, username, first_name, "assistant", reply)
+    await sync_message_to_site(user_id, username, first_name, "user", user_text, persona=role)
+    await sync_message_to_site(user_id, username, first_name, "assistant", reply, persona=role)
 
     return reply
 
@@ -1523,7 +1725,11 @@ async def handle_message(message: Message):
 
     await bot.send_chat_action(message.chat.id, "typing")
     reply = await get_ai_reply(
-        user_id, message.text, message.from_user.username, message.from_user.first_name
+        user_id,
+        message.text,
+        message.from_user.username,
+        message.from_user.first_name,
+        role=user_roles.get(user_id, DEFAULT_ROLE),
     )
     await message.answer(reply, reply_markup=main_menu_button_keyboard())
 
@@ -1602,7 +1808,11 @@ async def handle_voice(message: Message):
         return
 
     reply = await get_ai_reply(
-        user_id, recognized_text, message.from_user.username, message.from_user.first_name
+        user_id,
+        recognized_text,
+        message.from_user.username,
+        message.from_user.first_name,
+        role=user_roles.get(user_id, DEFAULT_ROLE),
     )
     await message.answer(f"🎤 Я услышал: «{recognized_text}»\n\n{reply}", reply_markup=main_menu_button_keyboard())
 
@@ -1693,17 +1903,18 @@ async def handle_photo(message: Message):
 
     # Добавляем в историю как текстовый обмен, чтобы бот помнил контекст
     user_id = message.from_user.id
-    history = user_histories.setdefault(user_id, [])
+    role = user_roles.get(user_id, DEFAULT_ROLE)
+    history = get_user_history(user_id, role)
     history.append({"role": "user", "content": f"[Отправил фото] {question}"})
     history.append({"role": "assistant", "content": reply})
     save_histories()
 
     await sync_message_to_site(
         user_id, message.from_user.username, message.from_user.first_name,
-        "user", f"[Отправил фото] {question}",
+        "user", f"[Отправил фото] {question}", persona=role,
     )
     await sync_message_to_site(
-        user_id, message.from_user.username, message.from_user.first_name, "assistant", reply
+        user_id, message.from_user.username, message.from_user.first_name, "assistant", reply, persona=role
     )
 
     await message.answer(reply, reply_markup=main_menu_button_keyboard())
