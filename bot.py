@@ -18,7 +18,7 @@ from aiogram.types import (
     MenuButtonWebApp,
     WebAppInfo,
 )
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandStart, CommandObject
 from groq import Groq, APIConnectionError, APIStatusError, RateLimitError
 from openai import OpenAI
 from gtts import gTTS
@@ -1856,8 +1856,54 @@ async def callback_menu_back(callback: CallbackQuery):
 
 # ==================== ОСНОВНЫЕ КОМАНДЫ ====================
 
+async def confirm_web_auth(token: str, user_id: int, username: str | None, first_name: str | None) -> bool:
+    """Сообщает сайту, что пользователь подтвердил вход через бота (по одноразовому токену)."""
+    if not BOTYARA_API_URL or not BOT_INTERNAL_SECRET:
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{BOTYARA_API_URL}/api/bot/telegram-auth-confirm",
+                json={
+                    "token": token,
+                    "telegram_id": user_id,
+                    "telegram_username": username,
+                    "telegram_first_name": first_name,
+                },
+                headers={"X-Bot-Secret": BOT_INTERNAL_SECRET},
+            )
+            resp.raise_for_status()
+            return resp.json().get("status") == "ok"
+    except Exception:
+        logging.exception("Не удалось подтвердить вход через бота на сайте")
+        return False
+
+
 @dp.message(CommandStart())
-async def cmd_start(message: Message):
+async def cmd_start(message: Message, command: CommandObject | None = None):
+    # Если это переход по ссылке входа с сайта — /start web_auth_<токен> — подтверждаем
+    # вход и не запускаем обычный сценарий приветствия
+    payload = (command.args if command else None) or ""
+    if payload.startswith("web_auth_"):
+        token = payload[len("web_auth_"):]
+        register_user(message.from_user.id)
+        ok = await confirm_web_auth(
+            token, message.from_user.id, message.from_user.username, message.from_user.first_name
+        )
+        if ok:
+            await message.answer(
+                "✅ Готово! Возвращайся на сайт — вход выполнен автоматически.\n\n"
+                "Можешь заодно продолжить общение и здесь, в боте 👇",
+                reply_markup=main_menu_button_keyboard(),
+            )
+        else:
+            await message.answer(
+                "⚠️ Не получилось подтвердить вход — возможно, ссылка устарела. "
+                "Вернись на сайт и запроси вход через бота ещё раз.",
+                reply_markup=main_menu_button_keyboard(),
+            )
+        return
+
     register_user(message.from_user.id)
     user_histories[message.from_user.id] = {}
     user_roles[message.from_user.id] = DEFAULT_ROLE
