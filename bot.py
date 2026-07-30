@@ -15,6 +15,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    MenuButtonWebApp,
+    WebAppInfo,
 )
 from aiogram.filters import CommandStart
 from groq import Groq, APIConnectionError, APIStatusError, RateLimitError
@@ -294,7 +296,10 @@ WELCOME_TEXT = (
     "📸 Разбираю фотки — гружу, вижу, отвечаю\n"
     "🌐 Шпарю переводы на любой язык\n"
     "🎨 Собираю крутые промпты — для музыки в Suno, картинок и видео. "
-    "Скажи, что хочешь получить, и я выкачу готовый промпт под нужную нейронку\n\n"
+    "Скажи, что хочешь получить, и я выкачу готовый промпт под нужную нейронку\n"
+    "🖼️ Есть галерея — публикуй промпты, лайкай чужие, общайся в открытом чате\n\n"
+    "💡 Кнопка «Запустить» рядом с полем ввода открывает полную версию на сайте — "
+    "профиль, уровни, достижения и всё остальное там ещё удобнее.\n\n"
     "Погнали, я на связи 24/7 🔥\n"
     "Выбирай режим прямо в меню ниже 👇"
 )
@@ -770,13 +775,22 @@ async def send_voice_reply(chat_id: int, text: str):
 def main_menu_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="💬 Общение", callback_data="menu_chat")],
-            [InlineKeyboardButton(text="🌐 Переводчик", callback_data="menu_translate")],
-            [InlineKeyboardButton(text="🎨 Промпты", callback_data="menu_prompts")],
-            [InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover")],
-            [InlineKeyboardButton(text="⭐ Избранное", callback_data="menu_favorites")],
-            [InlineKeyboardButton(text="🖼️ Галерея", callback_data="menu_gallery")],
-            [InlineKeyboardButton(text="🌍 Общий чат", callback_data="menu_publicchat")],
+            [
+                InlineKeyboardButton(text="🌐 Открыть сайт", url="https://24promtbot.ru"),
+                InlineKeyboardButton(text="💬 Общение", callback_data="menu_chat"),
+            ],
+            [
+                InlineKeyboardButton(text="🗣 Переводчик", callback_data="menu_translate"),
+                InlineKeyboardButton(text="🎨 Промпты", callback_data="menu_prompts"),
+            ],
+            [
+                InlineKeyboardButton(text="🖼 Обложка трека", callback_data="menu_cover"),
+                InlineKeyboardButton(text="⭐ Избранное", callback_data="menu_favorites"),
+            ],
+            [
+                InlineKeyboardButton(text="🖼️ Галерея", callback_data="menu_gallery"),
+                InlineKeyboardButton(text="🌍 Общий чат", callback_data="menu_publicchat"),
+            ],
             [InlineKeyboardButton(text="ℹ️ Помощь", callback_data="menu_help")],
         ]
     )
@@ -784,7 +798,8 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
 
 def main_menu_button_keyboard() -> InlineKeyboardMarkup:
     """Маленькая клавиатура из одной кнопки — вернуться в главное меню.
-    Используется везде, где бот отвечает вне контекста разделов (обычный чат, команды)."""
+    Используется везде, где бот отвечает вне контекста разделов (обычный чат, команды).
+    Кнопка сайта отдельно не нужна — она теперь всегда под рукой как кнопка меню Telegram."""
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu_back")]]
     )
@@ -857,12 +872,24 @@ ROLE_MENU_TEXT = (
     "У каждой роли своя манера речи и своя отдельная история — как вкладки на сайте, они не смешиваются."
 )
 MENU_HELP_TEXT = (
-    "ℹ️ <b>Помощь</b>\n\n"
-    "— Просто пиши мне вопросы, и я отвечу с помощью нейросети\n"
-    "— /reset — очистить историю нашего диалога\n"
-    "— /translate — перевод текста командой\n"
+    "ℹ️ <b>Как я устроен</b>\n\n"
+    "💬 <b>Общение</b> — просто пиши, говори голосом или присылай фото. Можно выбрать роль "
+    "(друг, наставник, мотиватор и другие) — у каждой своя отдельная память.\n"
+    "🗣 <b>Переводчик</b> — переведу текст на любой язык.\n"
+    "🎨 <b>Промпты</b> — помогу составить промпт для Suno, генерации картинок или видео.\n"
+    "🖼 <b>Обложка трека</b> — соберу промпт под обложку по тексту песни.\n"
+    "⭐ <b>Избранное</b> — сюда попадают сохранённые промпты, оттуда же можно опубликовать "
+    "их в галерею.\n"
+    "🖼️ <b>Галерея</b> — промпты, которыми поделились другие пользователи, с комментариями "
+    "и лайками.\n"
+    "🌍 <b>Общий чат</b> — открытая переписка, видна всем.\n"
+    "🌐 То же самое (и даже больше — профиль, уровни, достижения) есть на сайте — кнопка "
+    "«Запустить» всегда под рукой рядом с полем ввода.\n\n"
+    "Команды:\n"
+    "— /reset — очистить историю текущей роли общения\n"
+    "— /translate <текст> — быстрый перевод без захода в меню\n"
     "— /menu — открыть это меню\n"
-    "— /help — показать список команд"
+    "— /help — показать эту справку"
 )
 
 # Языки с быстрым доступом из меню переводчика
@@ -2530,6 +2557,15 @@ async def handle_photo(message: Message):
 
 
 async def main():
+    # Постоянная кнопка меню слева от поля ввода (как в других ботах) — открывает сайт
+    # прямо внутри Telegram, без переключения приложений
+    try:
+        await bot.set_chat_menu_button(
+            menu_button=MenuButtonWebApp(text="Запустить", web_app=WebAppInfo(url="https://24promtbot.ru"))
+        )
+    except Exception:
+        logging.exception("Не удалось установить кнопку меню Telegram (не критично)")
+
     print("Бот запущен. Не закрывай это окно.")
     await dp.start_polling(bot)
 
