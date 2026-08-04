@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import tempfile
+from urllib.parse import urlparse
 import time
 from datetime import date, timedelta
 import httpx
@@ -37,6 +38,12 @@ PROMPT_STICKER_ID = os.getenv("PROMPT_STICKER_ID")  # file_id стикера, к
 # попадали в общую базу данных и были видны на сайте
 BOTYARA_API_URL = os.getenv("BOTYARA_API_URL")
 BOT_INTERNAL_SECRET = os.getenv("BOT_INTERNAL_SECRET")
+
+if BOTYARA_API_URL:
+    BOTYARA_API_URL = BOTYARA_API_URL.rstrip("/")
+    parsed_api_url = urlparse(BOTYARA_API_URL)
+    if parsed_api_url.scheme != "https" or not parsed_api_url.netloc:
+        raise ValueError("BOTYARA_API_URL must be an absolute HTTPS URL")
 
 if not TELEGRAM_TOKEN or not GROQ_API_KEY:
     raise ValueError(
@@ -664,6 +671,10 @@ user_request_times: dict[int, list[float]] = {}
 def is_rate_limited(user_id: int) -> bool:
     """Возвращает True, если пользователь превысил лимит запросов."""
     now = time.time()
+    if len(user_request_times) > 10_000:
+        stale_before = now - max(RATE_LIMIT_WINDOW * 2, 3600)
+        for stale_user in [uid for uid, values in user_request_times.items() if not values or values[-1] < stale_before]:
+            user_request_times.pop(stale_user, None)
     timestamps = user_request_times.setdefault(user_id, [])
     # Оставляем только те запросы, что были в пределах окна
     recent = [t for t in timestamps if now - t < RATE_LIMIT_WINDOW]
@@ -2440,12 +2451,15 @@ async def handle_voice(message: Message):
                 language="ru",
             )
         recognized_text = transcription.text
-    except Exception as e:
+    except Exception:
         logging.exception("Ошибка распознавания голоса")
-        await message.answer(f"Не удалось распознать голосовое сообщение: {e}", reply_markup=main_menu_button_keyboard())
+        await message.answer("Не удалось распознать голосовое сообщение. Попробуй ещё раз позже.", reply_markup=main_menu_button_keyboard())
         return
     finally:
-        os.remove(tmp_path)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            logging.warning("Не удалось удалить временный аудиофайл", exc_info=True)
 
     if not recognized_text.strip():
         await message.answer("Не удалось разобрать речь, попробуй ещё раз.", reply_markup=main_menu_button_keyboard())
