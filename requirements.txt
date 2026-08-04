@@ -4,3 +4,4 @@ openai
 python-dotenv
 gTTS
 httpx
+click>=8.3.3
